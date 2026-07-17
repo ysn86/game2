@@ -20,10 +20,53 @@
     -webkit-user-select: none; user-select: none;
     cursor: pointer;
   }
+  #nameOverlay {
+    display: none;
+    position: fixed; inset: 0;
+    background: rgba(10, 40, 60, 0.55);
+    align-items: center; justify-content: center;
+    z-index: 10;
+  }
+  #nameCard {
+    background: #fff;
+    border-radius: 22px;
+    padding: 26px 30px;
+    text-align: center;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.3);
+    width: min(320px, 84vw);
+  }
+  #nameTitle {
+    font-size: 22px; font-weight: bold; color: #e8734a;
+    margin-bottom: 14px;
+  }
+  #nameInput {
+    width: 100%; box-sizing: border-box;
+    font-size: 18px; text-align: center;
+    padding: 10px;
+    border: 3px solid #5fd3cf; border-radius: 12px;
+    outline: none;
+    font-family: inherit;
+  }
+  #nameOk {
+    margin-top: 14px;
+    font-size: 18px; font-weight: bold;
+    color: #fff; background: linear-gradient(#ffb13e, #e8734a);
+    border: none; border-radius: 14px;
+    padding: 10px 34px;
+    cursor: pointer;
+    font-family: inherit;
+  }
 </style>
 </head>
 <body>
 <canvas id="game" width="480" height="720"></canvas>
+<div id="nameOverlay">
+  <div id="nameCard">
+    <div id="nameTitle">🎉 ランクイン! 🎉</div>
+    <input id="nameInput" maxlength="8" placeholder="なまえ (8もじまで)">
+    <button id="nameOk">とうろく</button>
+  </div>
+</div>
 <script>
 'use strict';
 
@@ -57,6 +100,11 @@ const CHARS = [
   { id: 4, name: 'かめたろう',     color: '#4fc2b0', dark: '#379a8b' },
 ];
 const BUBBLE_TYPE = -1; // 7チェーン以上で出るシャボン玉ボーナス
+const HABU_TYPE = -2;   // おじゃまツム(ハブ)。つなげない。シャボン玉か台風で退治
+const HABU_MAX = 3;     // 画面内のハブ上限
+const COMBO_WINDOW = 2.5;   // コンボが途切れるまでの秒数
+const COMBO_MULT_MAX = 3;   // コンボ倍率の上限
+const RHYTHM_WINDOW = 0.09; // エイサーリズムボーナスの判定幅(秒)
 
 // ---------- 状態 ----------
 let state = 'title';   // title / play / result
@@ -76,6 +124,18 @@ let shakeT = 0;
 let globalT = 0;
 let resultDelay = 0;
 let lastStamp = performance.now();
+let combo = 0, comboTimer = 0, comboPopT = 0, maxCombo = 0;
+let playElapsed = 0;
+let typhoon = { state: 'none', t: 0, at: 0, done: false };
+let beatRef = 0, beatInt = 0;   // エイサーのビート基準時刻と間隔
+let pendingRank = false;
+let newRankIdx = -1;
+let ranking = [];
+try { ranking = JSON.parse(localStorage.getItem('churatsum-rank') || '[]'); } catch (e) { ranking = []; }
+if (ranking.length === 0 && best > 0) {
+  ranking = [{ n: 'ベストきろく', s: best }];
+  localStorage.setItem('churatsum-rank', JSON.stringify(ranking));
+}
 
 // =========================================================
 // キャラクター描画(オフスクリーンに事前レンダリング)
@@ -269,7 +329,54 @@ function drawKame(g) {
   face(g, { eyeY: 8, eyeX: 10, eyeR: 5 });
 }
 
+// --- ハブ(おじゃまツム) ---
+function drawHabu(g) {
+  ball(g, '#b3985a', '#8a7440');
+  // とぐろ
+  g.strokeStyle = 'rgba(122,98,48,0.8)'; g.lineWidth = 4; g.lineCap = 'round';
+  g.beginPath(); g.arc(0, 6, R * 0.62, 0.2, Math.PI - 0.2); g.stroke();
+  g.beginPath(); g.arc(0, 2, R * 0.38, 0.4, Math.PI - 0.4); g.stroke();
+  // ひし形もよう
+  g.fillStyle = 'rgba(96,74,30,0.65)';
+  const dm = [[-20, -14], [0, -22], [20, -14], [-10, -4], [10, -4]];
+  for (const [dx, dy] of dm) {
+    g.beginPath();
+    g.moveTo(dx, dy - 5); g.lineTo(dx + 5, dy); g.lineTo(dx, dy + 5); g.lineTo(dx - 5, dy);
+    g.closePath(); g.fill();
+  }
+  // しっぽ
+  g.strokeStyle = '#8a7440'; g.lineWidth = 5;
+  g.beginPath(); g.moveTo(R * 0.7, 16); g.quadraticCurveTo(R * 1.05, 8, R * 0.95, -4); g.stroke();
+  // ジト目と怒りまゆ
+  g.fillStyle = '#3a2a22';
+  for (const s of [-1, 1]) { g.beginPath(); g.ellipse(s * 11, -2, 5.5, 3, 0, 0, Math.PI * 2); g.fill(); }
+  g.fillStyle = '#fff';
+  for (const s of [-1, 1]) { g.beginPath(); g.arc(s * 11 - 1.5, -3.5, 1.4, 0, Math.PI * 2); g.fill(); }
+  g.strokeStyle = '#3a2a22'; g.lineWidth = 2.5; g.lineCap = 'round';
+  for (const s of [-1, 1]) { g.beginPath(); g.moveTo(s * 6, -11); g.lineTo(s * 16, -7); g.stroke(); }
+  // ちろちろした舌
+  g.strokeStyle = '#e05555'; g.lineWidth = 2.5;
+  g.beginPath();
+  g.moveTo(0, 10); g.lineTo(0, 17);
+  g.moveTo(0, 17); g.lineTo(-3, 21);
+  g.moveTo(0, 17); g.lineTo(3, 21);
+  g.stroke();
+}
+
 const SPRITES = [drawShisa, drawGoya, drawJinbei, drawHibi, drawKame].map(makeSprite);
+const HABU_SPRITE = makeSprite(drawHabu);
+
+// ---------- キャラ固有スキル ----------
+const SKILL_NEED = 10; // 発動に必要な同キャラ消去数
+const SKILLS = [
+  { name: 'まよけの ほうこう!', desc: 'まんなかの たてれつを けす' },
+  { name: 'にがみパワー!',       desc: 'フィーバーゲージ アップ' },
+  { name: 'おおきなくちで ぱくり!', desc: 'したの だんを たべる' },
+  { name: 'はなふぶき!',         desc: '5こを ハイビスカスに かえる' },
+  { name: 'ゆったりタイム!',     desc: 'じかん +3びょう' },
+];
+let skillGauge = [0, 0, 0, 0, 0];
+let skillFlashT = 0;
 
 // =========================================================
 // サウンド(Web Audio・琉球音階)
@@ -351,8 +458,10 @@ function scheduleBGM() {
     const t = nextNoteTime;
     const m = MELODY[s];
     if (m) pluck(m, t, 0.22, bgmGain);
-    // ベース(4分)
+    // ベース(4分) + エイサーのビート基準を記録
     if (s % 2 === 0) {
+      beatRef = t;
+      beatInt = stepDur * 2 * (fever ? 0.85 : 1);
       const bar = Math.floor(s / 8);
       const beat = Math.floor((s % 8) / 2);
       const root = BASSROOT[bar];
@@ -413,6 +522,36 @@ function seEnd() {
   const t = AC.currentTime;
   [84, 79, 77, 76, 72].forEach((m, i) => pluck(m, t + i * 0.16, 0.45));
   [72, 76, 79, 84].forEach(m => pluck(m, t + 0.9, 0.4));
+}
+function hiss(dur, vel, freq) {
+  if (!AC) return;
+  const t = AC.currentTime;
+  const buf = AC.createBuffer(1, AC.sampleRate * dur, AC.sampleRate);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / d.length);
+  const src = AC.createBufferSource(); src.buffer = buf;
+  const bp = AC.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = freq || 4000; bp.Q.value = 0.7;
+  const g = AC.createGain(); g.gain.value = vel;
+  src.connect(bp); bp.connect(g); g.connect(masterGain);
+  src.start(t);
+}
+function seHabu() { if (!AC) return; hiss(0.3, 0.3, 4500); drum(AC.currentTime, 80, 0.35); }
+function seTyphoonWarn() {
+  if (!AC) return;
+  const t = AC.currentTime;
+  [67, 60, 67, 60].forEach((m, i) => pluck(m, t + i * 0.18, 0.45));
+}
+function seWind() { hiss(2.0, 0.3, 900); }
+function seDon() {
+  if (!AC) return;
+  const t = AC.currentTime;
+  drum(t, 85, 0.9); drum(t + 0.02, 60, 0.5); hiss(0.06, 0.15, 3000);
+}
+function seSkill() {
+  if (!AC) return;
+  const t = AC.currentTime;
+  [72, 79, 84, 91].forEach((m, i) => pluck(m, t + i * 0.06, 0.5));
+  drum(t, 120, 0.6);
 }
 
 // =========================================================
@@ -539,14 +678,53 @@ function chainCenter(list) {
   };
 }
 
+// コンボを1つ進めて現在の倍率を返す
+function bumpCombo() {
+  combo++;
+  comboTimer = COMBO_WINDOW;
+  comboPopT = 0.3;
+  if (combo > maxCombo) maxCombo = combo;
+  if (combo >= 5 && combo % 5 === 0) {
+    floats.push({ x: W / 2, y: 200, text: `ちばりよ〜! ${combo}コンボ!`, life: 1.4, color: '#ffb13e', size: 28 });
+  }
+  return Math.min(COMBO_MULT_MAX, 1 + (combo - 1) * 0.1);
+}
+
+// うちなーぐちで ほめる
+function praise(n, c) {
+  let msg = null;
+  if (n >= 10) msg = 'まさかやー!!';
+  else if (n >= 8) msg = 'あきさみよー!';
+  else if (n >= 6) msg = 'でーじ じょうとう!';
+  else if (n >= 4) msg = 'じょうとう!';
+  if (msg) floats.push({ x: c.x, y: c.y - 36, text: msg, life: 1.3, color: '#fff', size: 24 });
+}
+
+// エイサーの太鼓の拍に合っていたらtrue
+function onEisaBeat() {
+  if (!AC || beatInt <= 0) return false;
+  const d = ((AC.currentTime - beatRef) % beatInt + beatInt) % beatInt;
+  return Math.min(d, beatInt - d) < RHYTHM_WINDOW;
+}
+
 function popChain(list) {
   const n = list.length;
   let pts = n * 100 + Math.max(0, n - 3) * (n - 3) * 40;
+  const mult = bumpCombo();
+  pts = Math.round(pts * mult);
+  const c = chainCenter(list);
+  // エイサー太鼓リズムボーナス
+  if (onEisaBeat()) {
+    pts = Math.round(pts * 1.3);
+    seDon();
+    floats.push({ x: c.x, y: c.y - 64, text: 'ハイサイ♪ リズムボーナス!', life: 1.1, color: '#ffd23e', size: 19 });
+  }
   if (fever) pts *= 2;
   score += pts;
   addFever(n);
+  skillGauge[list[0].type] = Math.min(SKILL_NEED, skillGauge[list[0].type] + n);
   seChainDone(n);
-  const c = chainCenter(list);
+  praise(n, c);
   floats.push({ x: c.x, y: c.y, text: '+' + pts, life: 1, color: fever ? '#ffd23e' : '#fff', size: 22 + Math.min(14, n * 2) });
   for (const t of list) {
     t.popT = 0.001;
@@ -567,22 +745,137 @@ function popBubble(b) {
   b.popT = 0.001;
   seBubble();
   burst(b.x, b.y, '#aee9ff');
-  let count = 0;
+  let count = 0, habu = 0;
   for (const t of tsums) {
     if (t === b || t.popT > 0 || t.type === BUBBLE_TYPE) continue;
     if (Math.hypot(t.x - b.x, t.y - b.y) < 118) {
       t.popT = 0.001;
-      burst(t.x, t.y, CHARS[t.type].color);
-      count++;
+      if (t.type === HABU_TYPE) {
+        habu++;
+        burst(t.x, t.y, '#c9b458');
+      } else {
+        skillGauge[t.type] = Math.min(SKILL_NEED, skillGauge[t.type] + 1);
+        burst(t.x, t.y, CHARS[t.type].color);
+        count++;
+      }
     }
   }
-  let pts = count * 90;
+  const mult = bumpCombo();
+  let pts = Math.round(count * 90 * mult) + habu * 500;
   if (fever) pts *= 2;
   score += pts;
-  addFever(count);
+  addFever(count + habu);
+  if (habu > 0) floats.push({ x: b.x, y: b.y - 56, text: `ハブたいじ! +${habu * 500}`, life: 1.3, color: '#c9f27f', size: 22 });
   if (pts > 0) floats.push({ x: b.x, y: b.y - 30, text: '+' + pts, life: 1, color: '#7fe3ff', size: 24 });
   shakeT = 0.3;
-  scheduleRespawn(count);
+  scheduleRespawn(count + habu);
+}
+
+// ---------- キャラスキル ----------
+function popByEffect(t, base) {
+  t.popT = 0.001;
+  if (t.type === HABU_TYPE) {
+    burst(t.x, t.y, '#c9b458');
+    return 500;
+  }
+  skillGauge[t.type] = Math.min(SKILL_NEED, skillGauge[t.type] + 1);
+  burst(t.x, t.y, CHARS[t.type].color);
+  return base;
+}
+
+function fireSkill(i) {
+  skillGauge[i] = 0;
+  skillFlashT = 0.5;
+  seSkill();
+  bumpCombo();
+  floats.push({ x: W / 2, y: H / 2 - 100, text: SKILLS[i].name, life: 1.5, color: CHARS[i].color, size: 32 });
+  let pts = 0, removed = 0;
+  if (i === 0) {
+    // シーサー: 中央の縦列を消す(魔除けなのでハブも退治)
+    for (const t of tsums) {
+      if (t.popT > 0 || t.type === BUBBLE_TYPE) continue;
+      if (Math.abs(t.x - W / 2) < 72) { pts += popByEffect(t, 80); removed++; }
+    }
+  } else if (i === 1) {
+    // ゴーヤ: フィーバーゲージ大幅アップ
+    addFever(Math.ceil(FEVER_MAX * 0.4));
+  } else if (i === 2) {
+    // ジンベエ: 下の段をまとめて食べる
+    for (const t of tsums) {
+      if (t.popT > 0 || t.type === BUBBLE_TYPE || t.type === HABU_TYPE) continue;
+      if (t.y > FLOOR_Y - R * 2.4) { pts += popByEffect(t, 80); removed++; }
+    }
+  } else if (i === 3) {
+    // ハイビスカス: ランダム5個をハイビスカスに変える
+    const cand = tsums.filter(t => t.popT === 0 && t.type >= 0 && t.type !== 3);
+    for (let k = 0; k < 5 && cand.length > 0; k++) {
+      const t = cand.splice((Math.random() * cand.length) | 0, 1)[0];
+      t.type = 3;
+      burst(t.x, t.y, '#ff9ec4');
+    }
+  } else if (i === 4) {
+    // カメ: 時間+3秒
+    timeLeft += 3;
+  }
+  if (removed > 0) {
+    if (fever) pts *= 2;
+    score += pts;
+    addFever(removed);
+    floats.push({ x: W / 2, y: H / 2 - 60, text: '+' + pts, life: 1.2, color: '#fff', size: 26 });
+    scheduleRespawn(removed);
+    shakeT = 0.25;
+  }
+}
+
+// スキルアイコンの位置(画面上部)
+function skillIconPos(i) {
+  return { x: W / 2 + (i - 2) * 88, y: 108, r: 26 };
+}
+
+// ---------- 台風イベント ----------
+function updateTyphoon(dt) {
+  if (typhoon.state === 'none') {
+    if (!typhoon.done && playElapsed >= typhoon.at && !fever && timeLeft > 8) {
+      typhoon.state = 'warn';
+      typhoon.t = 1.5;
+      seTyphoonWarn();
+      floats.push({ x: W / 2, y: H / 2 - 80, text: 'たいふう ちゅういほう!', life: 1.5, color: '#ff6b5e', size: 30 });
+    }
+    return;
+  }
+  typhoon.t -= dt;
+  if (typhoon.state === 'warn') {
+    if (typhoon.t <= 0) {
+      typhoon.state = 'blow';
+      typhoon.t = 2.2;
+      seWind();
+      cancelChain();
+      // ハブは風で飛ばされる
+      let flew = 0;
+      for (const t of tsums) {
+        if (t.type === HABU_TYPE && t.popT === 0) { t.popT = 0.001; burst(t.x, t.y, '#c9b458'); flew++; }
+      }
+      if (flew > 0) floats.push({ x: W / 2, y: 260, text: 'ハブは かぜで とんでいった!', life: 1.4, color: '#e6f4ff', size: 20 });
+      shakeT = 0.3;
+    }
+  } else if (typhoon.state === 'blow') {
+    for (const t of tsums) {
+      if (t.popT > 0) continue;
+      t.vx += Math.sin(globalT * 9 + t.y * 0.02) * 1500 * dt;
+      t.vy += (Math.sin(globalT * 7 + t.x * 0.03) * 500 - 430) * dt;
+    }
+    if (typhoon.t <= 0) {
+      typhoon.state = 'none';
+      typhoon.done = true;
+      floats.push({ x: W / 2, y: H / 2 - 60, text: 'たいふう いっか☀', life: 1.3, color: '#fff', size: 24 });
+    }
+  }
+}
+
+function cancelChain() {
+  for (const t of chain) t.sel = false;
+  chain = [];
+  dragging = false;
 }
 
 let respawnQueue = 0, respawnT = 0;
@@ -729,7 +1022,7 @@ function drawTsum(t) {
     ctx.shadowColor = '#fff';
     ctx.shadowBlur = 18;
   }
-  const spr = SPRITES[t.type];
+  const spr = t.type === HABU_TYPE ? HABU_SPRITE : SPRITES[t.type];
   ctx.drawImage(spr, -spr.width / 4, -spr.height / 4, spr.width / 2, spr.height / 2);
   ctx.restore();
 }
@@ -865,6 +1158,80 @@ function drawHUD() {
   ctx.strokeStyle = 'rgba(0,0,0,0.3)'; ctx.lineWidth = 3;
   ctx.strokeText('フィーバー', gx + gw / 2, gy + 13.5);
   ctx.fillText('フィーバー', gx + gw / 2, gy + 13.5);
+
+  drawSkillIcons();
+  drawCombo();
+  ctx.restore();
+}
+
+// キャラスキルのアイコン(上部)
+function drawSkillIcons() {
+  for (let i = 0; i < 5; i++) {
+    const p = skillIconPos(i);
+    const ready = skillGauge[i] >= SKILL_NEED;
+    const ratio = skillGauge[i] / SKILL_NEED;
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    if (ready) {
+      const pu = 1 + Math.sin(globalT * 8) * 0.06;
+      ctx.scale(pu, pu);
+      ctx.shadowColor = '#ffd23e';
+      ctx.shadowBlur = 16;
+    }
+    // 背景円
+    ctx.fillStyle = ready ? 'rgba(255,250,230,0.95)' : 'rgba(255,255,255,0.55)';
+    ctx.beginPath(); ctx.arc(0, 0, p.r, 0, Math.PI * 2); ctx.fill();
+    ctx.shadowBlur = 0;
+    // キャラの顔(ミニ)
+    const spr = SPRITES[i];
+    ctx.globalAlpha = ready ? 1 : 0.55;
+    ctx.drawImage(spr, -p.r * 0.82, -p.r * 0.82, p.r * 1.64, p.r * 1.64);
+    ctx.globalAlpha = 1;
+    // ゲージリング
+    ctx.strokeStyle = ready ? '#ffb13e' : 'rgba(33,90,107,0.55)';
+    ctx.lineWidth = 4; ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.arc(0, 0, p.r + 1, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * ratio);
+    ctx.stroke();
+    if (ready) {
+      ctx.fillStyle = '#e8734a';
+      ctx.font = 'bold 10px sans-serif'; ctx.textAlign = 'center';
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 3;
+      ctx.strokeText('タップ!', 0, p.r + 14);
+      ctx.fillText('タップ!', 0, p.r + 14);
+    }
+    ctx.restore();
+  }
+}
+
+// コンボ表示(タイマーの下)
+function drawCombo() {
+  if (combo < 2) return;
+  const cx = W - 60, cy = 178;
+  const s = 1 + Math.max(0, comboPopT) * 0.8;
+  const mult = Math.min(COMBO_MULT_MAX, 1 + (combo - 1) * 0.1);
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.scale(s, s);
+  ctx.textAlign = 'center';
+  ctx.lineJoin = 'round';
+  ctx.font = 'bold 30px sans-serif';
+  ctx.lineWidth = 6; ctx.strokeStyle = 'rgba(232,115,74,0.9)';
+  ctx.strokeText(combo, 0, 2);
+  ctx.fillStyle = '#fff';
+  ctx.fillText(combo, 0, 2);
+  ctx.font = 'bold 12px sans-serif';
+  ctx.lineWidth = 4;
+  ctx.strokeText('コンボ', 0, 18);
+  ctx.fillText('コンボ', 0, 18);
+  ctx.fillStyle = '#ffd23e';
+  ctx.strokeText('x' + mult.toFixed(1), 0, 34);
+  ctx.fillText('x' + mult.toFixed(1), 0, 34);
+  // 残り時間リング
+  ctx.strokeStyle = 'rgba(255,255,255,0.85)'; ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.arc(0, 8, 30, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * Math.max(0, comboTimer / COMBO_WINDOW));
+  ctx.stroke();
   ctx.restore();
 }
 
@@ -902,13 +1269,14 @@ function drawTitle() {
 
   // 説明
   ctx.fillStyle = 'rgba(255,255,255,0.85)';
-  roundRect(50, 400, W - 100, 130, 18); ctx.fill();
+  roundRect(50, 400, W - 100, 150, 18); ctx.fill();
   ctx.fillStyle = '#215a6b';
   ctx.font = 'bold 19px sans-serif';
-  ctx.fillText('おなじ なかまを 3こ いじょう', W / 2, 440);
-  ctx.fillText('なぞって つなげよう!', W / 2, 470);
-  ctx.font = '15px sans-serif';
-  ctx.fillText('7こ つなぐと シャボンだまが でるよ', W / 2, 505);
+  ctx.fillText('おなじ なかまを 3こ いじょう', W / 2, 438);
+  ctx.fillText('なぞって つなげよう!', W / 2, 466);
+  ctx.font = '14px sans-serif';
+  ctx.fillText('7こ つなぐと シャボンだま・ハブに ちゅうい!', W / 2, 498);
+  ctx.fillText('うえの アイコンで キャラスキル はつどう!', W / 2, 524);
 
   // ハイスコア
   if (best > 0) {
@@ -926,6 +1294,59 @@ function drawTitle() {
   ctx.strokeText('タップで はじめる!', W / 2, 640);
   ctx.fillStyle = '#fff';
   ctx.fillText('タップで はじめる!', W / 2, 640);
+  ctx.globalAlpha = 1;
+
+  // ランキングボタン
+  ctx.fillStyle = 'rgba(255,255,255,0.85)';
+  roundRect(RANK_BTN_TITLE.x, RANK_BTN_TITLE.y, RANK_BTN_TITLE.w, RANK_BTN_TITLE.h, 12); ctx.fill();
+  ctx.fillStyle = '#215a6b';
+  ctx.font = 'bold 15px sans-serif';
+  ctx.fillText('🏆 ランキング', RANK_BTN_TITLE.x + RANK_BTN_TITLE.w / 2, RANK_BTN_TITLE.y + 25);
+  ctx.restore();
+}
+
+const RANK_BTN_TITLE = { x: 12, y: 12, w: 130, h: 38 };
+const RANK_BTN_RESULT = { x: W / 2 - 90, y: 585, w: 180, h: 46 };
+function inRect(p, r) { return p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h; }
+
+// ランキング画面
+function drawRanking() {
+  drawBG();
+  ctx.save();
+  ctx.fillStyle = 'rgba(20,60,80,0.5)'; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = 'rgba(255,255,255,0.94)';
+  roundRect(36, 90, W - 72, 520, 24); ctx.fill();
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#e8734a';
+  ctx.font = 'bold 30px sans-serif';
+  ctx.fillText('🏆 ランキング 🏆', W / 2, 138);
+  const medals = ['🥇', '🥈', '🥉'];
+  ctx.font = 'bold 19px sans-serif';
+  if (ranking.length === 0) {
+    ctx.fillStyle = '#888';
+    ctx.fillText('まだ きろくが ないよ', W / 2, 320);
+  }
+  ranking.forEach((r, i) => {
+    const y = 182 + i * 40;
+    if (i === newRankIdx) {
+      ctx.fillStyle = `rgba(255,210,62,${0.3 + 0.2 * Math.sin(globalT * 6)})`;
+      roundRect(50, y - 24, W - 100, 34, 10); ctx.fill();
+    }
+    ctx.textAlign = 'left';
+    ctx.fillStyle = i === 0 ? '#d8a200' : i === 1 ? '#8a97a5' : i === 2 ? '#b26b3c' : '#215a6b';
+    ctx.fillText(medals[i] || `${i + 1}い`, 64, y);
+    ctx.fillStyle = '#215a6b';
+    ctx.fillText(r.n, 126, y);
+    ctx.textAlign = 'right';
+    ctx.fillText(r.s.toLocaleString(), W - 64, y);
+  });
+  ctx.textAlign = 'center';
+  ctx.globalAlpha = 0.6 + 0.4 * Math.sin(globalT * 5);
+  ctx.font = 'bold 22px sans-serif';
+  ctx.strokeStyle = 'rgba(232,115,74,0.9)'; ctx.lineWidth = 6; ctx.lineJoin = 'round';
+  ctx.strokeText('タップで もどる', W / 2, 660);
+  ctx.fillStyle = '#fff';
+  ctx.fillText('タップで もどる', W / 2, 660);
   ctx.restore();
 }
 
@@ -961,17 +1382,26 @@ function drawResult() {
     ctx.fillText('ハイスコア ' + best.toLocaleString(), W / 2, 395);
   }
 
-  ctx.font = '15px sans-serif';
+  ctx.font = 'bold 15px sans-serif';
   ctx.fillStyle = '#215a6b';
-  ctx.fillText('めんそーれ また あそんでね', W / 2, 440);
+  ctx.fillText(`さいだいコンボ ${maxCombo}`, W / 2, 428);
+  ctx.font = '14px sans-serif';
+  ctx.fillText('めんそーれ また あそんでね', W / 2, 452);
 
   if (resultDelay <= 0) {
     ctx.globalAlpha = 0.6 + 0.4 * Math.sin(globalT * 5);
     ctx.font = 'bold 26px sans-serif';
-    ctx.strokeStyle = 'rgba(232,115,74,0.9)'; ctx.lineWidth = 6;
-    ctx.strokeText('タップで もういちど', W / 2, 560);
+    ctx.strokeStyle = 'rgba(232,115,74,0.9)'; ctx.lineWidth = 6; ctx.lineJoin = 'round';
+    ctx.strokeText('タップで もういちど', W / 2, 545);
     ctx.fillStyle = '#fff';
-    ctx.fillText('タップで もういちど', W / 2, 560);
+    ctx.fillText('タップで もういちど', W / 2, 545);
+    ctx.globalAlpha = 1;
+    // ランキングボタン
+    ctx.fillStyle = 'rgba(255,255,255,0.9)';
+    roundRect(RANK_BTN_RESULT.x, RANK_BTN_RESULT.y, RANK_BTN_RESULT.w, RANK_BTN_RESULT.h, 14); ctx.fill();
+    ctx.fillStyle = '#e8734a';
+    ctx.font = 'bold 19px sans-serif';
+    ctx.fillText('🏆 ランキング', W / 2, RANK_BTN_RESULT.y + 30);
   }
   ctx.restore();
 }
@@ -989,6 +1419,13 @@ function startGame() {
   particles = [];
   floats = [];
   respawnQueue = 0;
+  combo = 0; comboTimer = 0; comboPopT = 0; maxCombo = 0;
+  playElapsed = 0;
+  skillGauge = [0, 0, 0, 0, 0];
+  skillFlashT = 0;
+  typhoon = { state: 'none', t: 0, at: 15 + Math.random() * 20, done: false };
+  pendingRank = false;
+  newRankIdx = -1;
   fillTsums();
   state = 'play';
   seStart();
@@ -998,15 +1435,27 @@ function startGame() {
 function endGame() {
   state = 'result';
   resultDelay = 1.0;
-  for (const t of chain) t.sel = false;
-  chain = [];
-  dragging = false;
+  cancelChain();
   stopBGM();
   seEnd();
   if (score > best) {
     best = score;
     localStorage.setItem('churatsum-best', best);
   }
+  // ランキング入り判定 → 名前入力
+  pendingRank = score > 0 && (ranking.length < 10 || score > ranking[ranking.length - 1].s);
+  if (pendingRank) {
+    setTimeout(() => { if (state === 'result' && pendingRank) showNameEntry(); }, 1200);
+  }
+}
+
+function saveRanking(name) {
+  const entry = { n: name, s: score };
+  ranking.push(entry);
+  ranking.sort((a, b) => b.s - a.s);
+  ranking = ranking.slice(0, 10);
+  newRankIdx = ranking.indexOf(entry);
+  localStorage.setItem('churatsum-rank', JSON.stringify(ranking));
 }
 
 function update(dt) {
@@ -1026,6 +1475,7 @@ function update(dt) {
   }
 
   timeLeft -= dt;
+  playElapsed += dt;
   if (timeLeft <= 0) { timeLeft = 0; endGame(); return; }
 
   if (fever) {
@@ -1033,17 +1483,31 @@ function update(dt) {
     if (feverT <= 0) { fever = false; feverGauge = 0; }
   }
 
+  // コンボの制限時間
+  if (combo > 0) {
+    comboTimer -= dt;
+    if (comboTimer <= 0) combo = 0;
+  }
+  if (comboPopT > 0) comboPopT -= dt;
+  if (skillFlashT > 0) skillFlashT -= dt;
+
+  updateTyphoon(dt);
   physics(dt);
 
   // 消えるアニメ → 削除
   for (const t of tsums) if (t.popT > 0) t.popT += dt;
   tsums = tsums.filter(t => t.popT < 0.22);
 
-  // 補充(少しずつパラパラ落とす)
+  // 補充(少しずつパラパラ落とす)。たまにハブが混ざる
   if (respawnQueue > 0) {
     respawnT -= dt;
     if (respawnT <= 0) {
-      spawnTsums(1);
+      const habuCount = tsums.filter(t => t.type === HABU_TYPE && t.popT === 0).length;
+      if (habuCount < HABU_MAX && playElapsed > 8 && Math.random() < 0.08) {
+        tsums.push(newTsum(R + Math.random() * (W - R * 2), CEIL_SPAWN, HABU_TYPE));
+      } else {
+        spawnTsums(1);
+      }
       respawnQueue--;
       respawnT = 0.07;
     }
@@ -1059,6 +1523,8 @@ function render() {
   }
   if (state === 'title') {
     drawTitle();
+  } else if (state === 'ranking') {
+    drawRanking();
   } else if (state === 'result') {
     drawResult();
     drawParticles();
@@ -1070,6 +1536,7 @@ function render() {
     drawChain();
     drawParticles();
     drawHUD();
+    drawTyphoonFx();
     if (fever) {
       const p = 0.5 + 0.5 * Math.sin(globalT * 8);
       ctx.strokeStyle = `rgba(255,210,62,${0.5 + p * 0.5})`;
@@ -1078,6 +1545,34 @@ function render() {
     }
   }
   ctx.restore();
+}
+
+// 台風の見た目(暗転・風のすじ・注意報の点滅)
+function drawTyphoonFx() {
+  if (typhoon.state === 'warn') {
+    const blink = Math.sin(globalT * 12) > 0;
+    if (blink) {
+      ctx.fillStyle = 'rgba(255,60,50,0.10)';
+      ctx.fillRect(0, 0, W, H);
+      ctx.strokeStyle = 'rgba(255,80,70,0.7)';
+      ctx.lineWidth = 8;
+      ctx.strokeRect(4, 4, W - 8, H - 8);
+    }
+  } else if (typhoon.state === 'blow') {
+    ctx.fillStyle = 'rgba(30,50,70,0.28)';
+    ctx.fillRect(0, 0, W, H);
+    // 風のすじ
+    ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+    ctx.lineWidth = 2.5; ctx.lineCap = 'round';
+    for (let i = 0; i < 16; i++) {
+      const sx = W + 140 - ((globalT * 900 + i * 173) % (W + 280));
+      const sy = (i * 47.3) % H;
+      ctx.beginPath();
+      ctx.moveTo(sx, sy);
+      ctx.lineTo(sx - 80, sy + 22);
+      ctx.stroke();
+    }
+  }
 }
 
 function loop(stamp) {
@@ -1103,11 +1598,37 @@ canvas.addEventListener('pointerdown', e => {
   e.preventDefault();
   initAudio();
   pointer = toGame(e);
-  if (state === 'title') { startGame(); return; }
-  if (state === 'result') { if (resultDelay <= 0) startGame(); return; }
+  if (state === 'title') {
+    if (inRect(pointer, RANK_BTN_TITLE)) { state = 'ranking'; return; }
+    startGame();
+    return;
+  }
+  if (state === 'ranking') { state = 'title'; return; }
+  if (state === 'result') {
+    if (resultDelay <= 0) {
+      if (inRect(pointer, RANK_BTN_RESULT)) { state = 'ranking'; return; }
+      startGame();
+    }
+    return;
+  }
+  // スキルアイコン
+  for (let i = 0; i < 5; i++) {
+    const p = skillIconPos(i);
+    if (Math.hypot(pointer.x - p.x, pointer.y - p.y) < p.r + 8) {
+      if (skillGauge[i] >= SKILL_NEED) fireSkill(i);
+      return;
+    }
+  }
+  if (typhoon.state === 'blow') return;
   const t = tsumAt(pointer.x, pointer.y, 1.1);
   if (!t) return;
   if (t.type === BUBBLE_TYPE) { popBubble(t); return; }
+  if (t.type === HABU_TYPE) {
+    seHabu();
+    floats.push({ x: t.x, y: t.y - 44, text: 'ハブ! つなげない!', life: 1, color: '#ffb0a0', size: 18 });
+    t.vy -= 150;
+    return;
+  }
   dragging = true;
   t.sel = true;
   chain = [t];
@@ -1129,6 +1650,27 @@ function endDrag(e) {
 canvas.addEventListener('pointerup', endDrag);
 canvas.addEventListener('pointercancel', endDrag);
 canvas.addEventListener('pointerleave', endDrag);
+
+// ---------- ランキングの名前入力 ----------
+const nameOverlay = document.getElementById('nameOverlay');
+const nameInput = document.getElementById('nameInput');
+document.getElementById('nameOk').addEventListener('click', confirmName);
+nameInput.addEventListener('keydown', e => { if (e.key === 'Enter') confirmName(); });
+
+function showNameEntry() {
+  nameOverlay.style.display = 'flex';
+  nameInput.value = localStorage.getItem('churatsum-name') || '';
+  setTimeout(() => nameInput.focus(), 60);
+}
+
+function confirmName() {
+  const name = (nameInput.value.trim() || 'なーなしぐゎー').slice(0, 8);
+  localStorage.setItem('churatsum-name', name);
+  nameOverlay.style.display = 'none';
+  pendingRank = false;
+  saveRanking(name);
+  state = 'ranking';
+}
 
 // タイトル画面の背景にもツムを敷いておく
 fillTsums();
