@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>COSMIC GRADIUS - 横スクロールシューティング</title>
+<title>R-FORCE - 横スクロールシューティング</title>
 <style>
   html, body {
     margin: 0; padding: 0; height: 100%;
@@ -34,7 +34,8 @@
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
 const W = canvas.width, H = canvas.height;
-const HUD_H = 40; // 下部パワーゲージ領域
+const HUD_H = 40; // 下部ゲージ領域
+const CHARGE_MAX = 90;
 
 const rand = (a, b) => a + Math.random() * (b - a);
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
@@ -88,24 +89,31 @@ const AudioSys = {
 };
 
 const SFX = {
-  shoot()  { AudioSys.tone(880, 0.08, 'square', 0.07, -500); },
-  laser()  { AudioSys.tone(220, 0.15, 'sawtooth', 0.08, 900); },
-  missile(){ AudioSys.tone(300, 0.12, 'triangle', 0.09, -150); },
-  pickup() { // コインっぽいポップ音
+  shoot()  { AudioSys.tone(880, 0.08, 'square', 0.06, -500); },
+  laser()  { AudioSys.tone(220, 0.15, 'sawtooth', 0.07, 900); },
+  missile(){ AudioSys.tone(300, 0.12, 'triangle', 0.08, -150); },
+  charge(level) { AudioSys.tone(200 + level * 700, 0.07, 'square', 0.05, 60); },
+  beam() { // 波動砲
+    AudioSys.noise(0.3, 0.25);
+    AudioSys.tone(1200, 0.35, 'sawtooth', 0.16, -900);
+    AudioSys.tone(150, 0.3, 'square', 0.12, -60);
+  },
+  pickup() { // クリスタル取得のポップ音
     AudioSys.tone(988, 0.07, 'square', 0.14);
     AudioSys.tone(1319, 0.18, 'square', 0.14, 0, 0.07);
   },
-  powerup() { // パワーアップ発動ファンファーレ
+  powerup() { // パワーアップファンファーレ
     const notes = [523, 659, 784, 1047, 1319];
     notes.forEach((f, i) => AudioSys.tone(f, 0.12, 'square', 0.13, 0, i * 0.07));
   },
-  boom()   { AudioSys.noise(0.25, 0.22); AudioSys.tone(120, 0.2, 'square', 0.1, -80); },
-  bigBoom(){ AudioSys.noise(0.5, 0.3); AudioSys.tone(80, 0.4, 'sawtooth', 0.15, -50); },
+  forceMove() { AudioSys.tone(500, 0.12, 'triangle', 0.12, 350); },
+  forceAttach() { AudioSys.tone(700, 0.08, 'square', 0.1, -200); AudioSys.tone(900, 0.1, 'square', 0.1, 0, 0.06); },
+  boom()   { AudioSys.noise(0.25, 0.2); AudioSys.tone(120, 0.2, 'square', 0.09, -80); },
+  bigBoom(){ AudioSys.noise(0.5, 0.28); AudioSys.tone(80, 0.4, 'sawtooth', 0.14, -50); },
   playerDie() {
     AudioSys.noise(0.6, 0.3);
     [600, 450, 300, 150].forEach((f, i) => AudioSys.tone(f, 0.15, 'square', 0.12, -60, i * 0.12));
   },
-  shieldHit() { AudioSys.tone(200, 0.1, 'square', 0.12, 100); },
   gameStart() {
     [523, 659, 784, 1047].forEach((f, i) => AudioSys.tone(f, 0.1, 'triangle', 0.15, 0, i * 0.09));
   },
@@ -177,32 +185,121 @@ const input = {
   left:  () => keys['arrowleft'] || keys['a'],
   right: () => keys['arrowright'] || keys['d'],
   shoot: () => keys['z'] || keys[' '],
-  power: () => keys['x'] || keys['shift'],
+  force: () => keys['x'] || keys['shift'],
 };
 
 // ============================================================
-// パワーアップゲージ (グラディウス方式)
+// フォース (R-Type風の無敵ポッド)
 // ============================================================
-const POWER_SLOTS = ['SPEED', 'MISSILE', 'DOUBLE', 'LASER', 'OPTION', 'SHIELD'];
+const force = {
+  have: false, level: 0, color: 'red', // red / blue
+  state: 'attached', // attached / flying / floating / returning
+  x: 0, y: 0, targetX: 0,
+  reset() { this.have = false; this.level = 0; this.color = 'red'; this.state = 'attached'; },
+  gain() {
+    if (!this.have) {
+      this.have = true; this.level = 1;
+      this.state = 'attached';
+      this.x = player.x + 24; this.y = player.y;
+    } else if (this.level < 3) {
+      this.level++;
+    }
+  },
+  toggle() {
+    if (!this.have) return;
+    if (this.state === 'attached') {
+      this.state = 'flying';
+      this.targetX = clamp(player.x + 240, 100, W - 80);
+      SFX.forceMove();
+    } else if (this.state === 'floating' || this.state === 'flying') {
+      this.state = 'returning';
+      SFX.forceMove();
+    }
+  },
+  update() {
+    if (!this.have) return;
+    switch (this.state) {
+      case 'attached':
+        this.x = player.x + 24; this.y = player.y;
+        break;
+      case 'flying':
+        this.x += 7;
+        if (this.x >= this.targetX) this.state = 'floating';
+        break;
+      case 'floating':
+        this.y += Math.sin(game.frame * 0.05) * 0.4;
+        break;
+      case 'returning': {
+        const dx = (player.x + 24) - this.x, dy = player.y - this.y;
+        const d = Math.hypot(dx, dy);
+        if (d < 10 || !player.alive) {
+          this.state = 'attached';
+          SFX.forceAttach();
+        } else {
+          this.x += dx / d * 8; this.y += dy / d * 8;
+        }
+        break;
+      }
+    }
+  },
+  fire() {
+    if (!this.have) return;
+    const B = game.playerBullets;
+    B.push(makeBullet(this.x + 12, this.y, 9, 0, 'fshot'));
+    if (this.level >= 2) {
+      if (this.color === 'red') {
+        B.push(makeBullet(this.x + 12, this.y - 5, 12, 0, 'laser'));
+        if (this.level >= 3) B.push(makeBullet(this.x + 12, this.y + 5, 12, 0, 'laser'));
+      } else {
+        B.push(makeBullet(this.x + 8, this.y - 6, 7, -7, 'blue'));
+        B.push(makeBullet(this.x + 8, this.y + 6, 7, 7, 'blue'));
+        if (this.level >= 3) B.push(makeBullet(this.x + 12, this.y, 11, 0, 'blue'));
+      }
+    }
+  },
+  draw() {
+    if (!this.have) return;
+    const t = game.frame * 0.18;
+    const glow = 0.6 + 0.4 * Math.sin(t);
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    ctx.fillStyle = `rgba(255,120,20,${0.25 * glow})`;
+    ctx.beginPath(); ctx.arc(0, 0, 16, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#f80';
+    ctx.beginPath(); ctx.arc(0, 0, 11, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#fc3';
+    ctx.beginPath(); ctx.arc(0, 0, 7, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#a30';
+    ctx.beginPath(); ctx.arc(Math.cos(t) * 4, Math.sin(t) * 4, 3, 0, Math.PI * 2); ctx.fill();
+    // レベルリング
+    ctx.strokeStyle = this.color === 'red' ? '#f66' : '#6af';
+    ctx.lineWidth = 2;
+    for (let i = 0; i < this.level; i++) {
+      ctx.beginPath();
+      ctx.arc(0, 0, 13, t + i * (Math.PI * 2 / 3), t + i * (Math.PI * 2 / 3) + 1.1);
+      ctx.stroke();
+    }
+    ctx.lineWidth = 1;
+    ctx.restore();
+  },
+};
 
 // ============================================================
-// プレイヤー
+// プレイヤー (R-9風)
 // ============================================================
 const player = {
-  x: 100, y: H / 2, r: 10,
-  speed: 3.2, alive: true, invincible: 0,
-  shootCd: 0, missileCd: 0,
-  hasMissile: false, weapon: 'normal', // normal / double / laser
-  shieldHp: 0,
-  gauge: 0, // 0=なし 1..6
-  history: [], // オプション追従用の軌跡
-  options: 0,  // オプション数 (最大4)
+  x: 100, y: H / 2, r: 8,
+  speed: 3.4, alive: true, invincible: 0,
+  missileCd: 0, tapCd: 0,
+  hasMissile: false, bits: 0,
+  charge: 0, charging: false, wasShoot: false,
   reset(full) {
     this.x = 100; this.y = H / 2;
-    this.alive = true; this.invincible = 120;
+    this.alive = true; this.invincible = 180;
+    this.charge = 0; this.charging = false;
     if (full) {
-      this.speed = 3.2; this.hasMissile = false; this.weapon = 'normal';
-      this.shieldHp = 0; this.gauge = 0; this.options = 0; this.history = [];
+      this.speed = 3.4; this.hasMissile = false; this.bits = 0;
+      force.reset();
     }
   },
   update() {
@@ -215,122 +312,122 @@ const player = {
     if (input.right()) dx += 1;
     if (dx && dy) { dx *= 0.707; dy *= 0.707; }
     this.x = clamp(this.x + dx * this.speed, 15, W - 20);
-    this.y = clamp(this.y + dy * this.speed, 15, H - HUD_H - 15);
+    this.y = clamp(this.y + dy * this.speed, 40, H - HUD_H - 20);
 
-    // 軌跡記録 (オプション追従)
-    this.history.unshift({ x: this.x, y: this.y });
-    if (this.history.length > 100) this.history.pop();
-
-    // 射撃
-    if (this.shootCd > 0) this.shootCd--;
+    if (this.tapCd > 0) this.tapCd--;
     if (this.missileCd > 0) this.missileCd--;
-    if (input.shoot() && this.shootCd <= 0) {
-      this.fireFrom(this.x, this.y);
-      for (let i = 0; i < this.options; i++) {
-        const p = this.optionPos(i);
-        this.fireFrom(p.x, p.y);
-      }
-      this.shootCd = this.weapon === 'laser' ? 9 : 8;
-      if (this.weapon === 'laser') SFX.laser(); else SFX.shoot();
-      if (this.hasMissile && this.missileCd <= 0) {
-        game.playerBullets.push(makeBullet(this.x, this.y + 6, 4, 3, 'missile'));
-        this.missileCd = 24;
-        SFX.missile();
-      }
+
+    // ショット: 押した瞬間に発射、押しっぱなしで波動砲チャージ
+    const shooting = input.shoot();
+    if (shooting && !this.wasShoot && this.tapCd <= 0) {
+      this.fireNormal();
+      this.tapCd = 6;
     }
-    // パワーアップ発動
-    if (input.power() && this.gauge > 0 && !this._powerHeld) {
-      this.activatePower();
-    }
-    this._powerHeld = input.power();
-  },
-  fireFrom(x, y) {
-    const B = game.playerBullets;
-    if (this.weapon === 'laser') {
-      B.push(makeBullet(x + 14, y, 14, 0, 'laser'));
-    } else if (this.weapon === 'double') {
-      B.push(makeBullet(x + 14, y, 9, 0, 'shot'));
-      B.push(makeBullet(x + 8, y - 8, 6.4, -6.4, 'shot'));
+    if (shooting) {
+      this.charge = Math.min(this.charge + 1, CHARGE_MAX);
+      if (this.charge > 12) {
+        this.charging = true;
+        if (this.charge % 12 === 0 && this.charge < CHARGE_MAX) SFX.charge(this.charge / CHARGE_MAX);
+      }
     } else {
-      B.push(makeBullet(x + 14, y, 9, 0, 'shot'));
+      if (this.charging && this.charge >= 30) this.fireBeam();
+      this.charge = 0; this.charging = false;
     }
-  },
-  optionPos(i) {
-    const idx = Math.min((i + 1) * 14, this.history.length - 1);
-    return this.history[idx] || { x: this.x, y: this.y };
-  },
-  activatePower() {
-    const slot = POWER_SLOTS[this.gauge - 1];
-    switch (slot) {
-      case 'SPEED':   this.speed = Math.min(this.speed + 0.8, 8); break;
-      case 'MISSILE': this.hasMissile = true; break;
-      case 'DOUBLE':  this.weapon = 'double'; break;
-      case 'LASER':   this.weapon = 'laser'; break;
-      case 'OPTION':  if (this.options < 4) this.options++; break;
-      case 'SHIELD':  this.shieldHp = 3; break;
+    this.wasShoot = shooting;
+
+    // ミサイル (ゆるい追尾)
+    if (shooting && this.hasMissile && this.missileCd <= 0) {
+      game.playerBullets.push(makeBullet(this.x, this.y + 8, 5, 1.5, 'missile'));
+      this.missileCd = 26;
+      SFX.missile();
     }
-    this.gauge = 0;
-    SFX.powerup();
-    game.flashText = slot + ' UP!';
-    game.flashTimer = 60;
+
+    // フォース切り離し / 回収
+    if (input.force() && !this._forceHeld) force.toggle();
+    this._forceHeld = input.force();
+  },
+  fireNormal() {
+    const B = game.playerBullets;
+    B.push(makeBullet(this.x + 16, this.y, 10, 0, 'shot'));
+    for (let i = 0; i < this.bits; i++) {
+      const p = this.bitPos(i);
+      B.push(makeBullet(p.x + 8, p.y, 10, 0, 'fshot'));
+    }
+    force.fire();
+    SFX.shoot();
+  },
+  fireBeam() {
+    const pow = this.charge / CHARGE_MAX; // 0.33..1
+    game.playerBullets.push({
+      x: this.x + 20, y: this.y, vx: 13, vy: 0, type: 'beam',
+      dead: false, hitSet: new Set(),
+      dmg: 4 + Math.round(pow * 6), w: 8 + pow * 18,
+    });
+    SFX.beam();
+    spawnParticles(this.x + 24, this.y, 12, '#8df');
+  },
+  bitPos(i) {
+    const off = i === 0 ? -26 : 26;
+    return { x: this.x - 4, y: this.y + off + Math.sin(game.frame * 0.1 + i * 3) * 3 };
   },
   hit() {
     if (this.invincible > 0 || !this.alive) return;
-    if (this.shieldHp > 0) {
-      this.shieldHp--;
-      this.invincible = 30;
-      SFX.shieldHit();
-      spawnParticles(this.x + 15, this.y, 8, '#4df');
-      return;
-    }
     this.alive = false;
     SFX.playerDie();
     spawnParticles(this.x, this.y, 40, '#fa4');
     spawnParticles(this.x, this.y, 20, '#f44');
     game.lives--;
     if (game.lives > 0) {
-      setTimeout(() => player.reset(true), 1500);
+      setTimeout(() => player.reset(false), 1500); // 装備は維持して復活
     } else {
       setTimeout(() => { game.state = 'gameover'; SFX.gameOver(); }, 1200);
     }
   },
   draw() {
     if (!this.alive) return;
-    if (this.invincible > 0 && Math.floor(this.invincible / 4) % 2 === 0) return;
-    // オプション
-    for (let i = 0; i < this.options; i++) {
-      const p = this.optionPos(i);
-      const t = game.frame * 0.15 + i;
-      ctx.fillStyle = '#f80';
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, 7, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = '#fd4';
-      ctx.beginPath();
-      ctx.arc(p.x + Math.cos(t) * 3, p.y + Math.sin(t) * 3, 3, 0, Math.PI * 2);
-      ctx.fill();
+    // ビット
+    for (let i = 0; i < this.bits; i++) {
+      const p = this.bitPos(i);
+      ctx.fillStyle = '#9ab';
+      ctx.beginPath(); ctx.arc(p.x, p.y, 6, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#def';
+      ctx.beginPath(); ctx.arc(p.x - 2, p.y - 2, 2.5, 0, Math.PI * 2); ctx.fill();
     }
-    // 機体
+    if (this.invincible > 0 && Math.floor(this.invincible / 4) % 2 === 0) return;
+    // R-9風の機体
     ctx.save();
     ctx.translate(this.x, this.y);
-    ctx.fillStyle = '#8cf';
-    ctx.beginPath();
-    ctx.moveTo(16, 0); ctx.lineTo(-10, -9); ctx.lineTo(-5, 0); ctx.lineTo(-10, 9);
-    ctx.closePath(); ctx.fill();
-    ctx.fillStyle = '#fff';
-    ctx.fillRect(-2, -3, 8, 6);
     // エンジン炎
-    ctx.fillStyle = game.frame % 4 < 2 ? '#fa0' : '#f60';
+    ctx.fillStyle = game.frame % 4 < 2 ? '#4af' : '#8df';
     ctx.beginPath();
-    ctx.moveTo(-10, -4); ctx.lineTo(-18 - Math.random() * 5, 0); ctx.lineTo(-10, 4);
+    ctx.moveTo(-12, -3); ctx.lineTo(-20 - Math.random() * 5, 0); ctx.lineTo(-12, 3);
     ctx.closePath(); ctx.fill();
+    // 胴体 (白)
+    ctx.fillStyle = '#dde4ee';
+    ctx.beginPath();
+    ctx.moveTo(18, 0); ctx.lineTo(2, -6); ctx.lineTo(-12, -5); ctx.lineTo(-12, 5); ctx.lineTo(2, 6);
+    ctx.closePath(); ctx.fill();
+    // 上翼・下翼
+    ctx.fillStyle = '#8895aa';
+    ctx.beginPath(); ctx.moveTo(-2, -5); ctx.lineTo(-10, -11); ctx.lineTo(-12, -5); ctx.closePath(); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(-2, 5); ctx.lineTo(-10, 11); ctx.lineTo(-12, 5); ctx.closePath(); ctx.fill();
+    // コックピット (青)
+    ctx.fillStyle = '#3af';
+    ctx.beginPath();
+    ctx.ellipse(4, -1, 6, 3, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // ノーズの赤ライン
+    ctx.fillStyle = '#e44';
+    ctx.fillRect(10, -2, 8, 2);
     ctx.restore();
-    // シールド
-    if (this.shieldHp > 0) {
-      ctx.strokeStyle = `rgba(80,220,255,${0.4 + 0.2 * Math.sin(game.frame * 0.2)})`;
-      ctx.lineWidth = 3;
+    // チャージエフェクト
+    if (this.charging) {
+      const pow = this.charge / CHARGE_MAX;
+      const r = 6 + pow * 10 + Math.sin(game.frame * 0.5) * 2;
+      ctx.strokeStyle = pow >= 1 ? '#fff' : `rgba(100,200,255,${0.4 + pow * 0.5})`;
+      ctx.lineWidth = 2 + pow * 2;
       ctx.beginPath();
-      ctx.arc(this.x, this.y, 22, -1.2, 1.2);
+      ctx.arc(this.x + 22, this.y, r, 0, Math.PI * 2);
       ctx.stroke();
       ctx.lineWidth = 1;
     }
@@ -341,7 +438,11 @@ const player = {
 // 弾・敵・アイテム・パーティクル
 // ============================================================
 function makeBullet(x, y, vx, vy, type) {
-  return { x, y, vx, vy, type, dead: false, hitSet: type === 'laser' ? new Set() : null };
+  return {
+    x, y, vx, vy, type, dead: false,
+    hitSet: type === 'laser' ? new Set() : null,
+    bounces: type === 'blue' ? 2 : 0,
+  };
 }
 
 function spawnParticles(x, y, n, color) {
@@ -358,7 +459,7 @@ const ENEMY_TYPES = {
   fan: { hp: 1, r: 11, score: 100 },      // サイン波で飛ぶ雑魚
   rusher: { hp: 1, r: 11, score: 150 },   // 直進 + 狙い撃ち
   tumbler: { hp: 2, r: 12, score: 200 },  // 上下バウンド
-  carrier: { hp: 12, r: 22, score: 1000 },// 中型 (カプセル確定ドロップ)
+  carrier: { hp: 10, r: 22, score: 1000 },// 中型 (クリスタル確定ドロップ)
 };
 
 function spawnEnemy(type, x, y, opts = {}) {
@@ -367,41 +468,42 @@ function spawnEnemy(type, x, y, opts = {}) {
     type, x, y,
     hp: def.hp, r: def.r, score: def.score,
     t: 0, baseY: y, dead: false,
-    red: opts.red || false,        // 赤い敵はカプセルを落とす
+    red: opts.red || false,        // 赤い敵はクリスタルを落とす
     phase: opts.phase || 0,
-    vy: rand(1.5, 2.5) * (Math.random() < 0.5 ? 1 : -1),
-    shootTimer: rand(60, 150),
+    vy: rand(1.0, 1.8) * (Math.random() < 0.5 ? 1 : -1),
+    shootTimer: rand(100, 200),
   });
 }
 
 function updateEnemy(e) {
   e.t++;
-  const spd = 1.6 + game.difficulty * 0.25;
+  const spd = 1.3 + game.difficulty * 0.2;
   switch (e.type) {
     case 'fan':
-      e.x -= spd * 1.3;
-      e.y = e.baseY + Math.sin(e.t * 0.06 + e.phase) * 55;
+      e.x -= spd * 1.2;
+      e.y = e.baseY + Math.sin(e.t * 0.05 + e.phase) * 50;
       break;
     case 'rusher':
-      e.x -= spd * 1.7;
+      e.x -= spd * 1.5;
       e.shootTimer--;
-      if (e.shootTimer <= 0 && e.x > player.x + 100 && e.x < W) {
-        fireAimed(e, 2.6 + game.difficulty * 0.2);
-        e.shootTimer = rand(90, 180) / (1 + game.difficulty * 0.15);
+      if (e.shootTimer <= 0 && e.x > player.x + 120 && e.x < W) {
+        fireAimed(e, 2.0 + game.difficulty * 0.15);
+        e.shootTimer = rand(140, 240) / (1 + game.difficulty * 0.1);
       }
       break;
     case 'tumbler':
-      e.x -= spd;
+      e.x -= spd * 0.9;
       e.y += e.vy;
-      if (e.y < 20 || e.y > H - HUD_H - 20) e.vy *= -1;
+      if (e.y < 45 || e.y > H - HUD_H - 20) e.vy *= -1;
       break;
     case 'carrier':
-      e.x -= spd * 0.55;
+      e.x -= spd * 0.5;
       e.y = e.baseY + Math.sin(e.t * 0.02) * 30;
       e.shootTimer--;
       if (e.shootTimer <= 0 && e.x < W) {
-        for (let a = -1; a <= 1; a++) fireAimed(e, 2.4, a * 0.3);
-        e.shootTimer = 100 / (1 + game.difficulty * 0.1);
+        fireAimed(e, 2.0, -0.25);
+        fireAimed(e, 2.0, 0.25);
+        e.shootTimer = 150 / (1 + game.difficulty * 0.1);
       }
       break;
   }
@@ -421,25 +523,28 @@ function fireAimed(e, speed, angleOff = 0) {
 function drawEnemy(e) {
   ctx.save();
   ctx.translate(e.x, e.y);
-  const body = e.red ? '#f55' : { fan: '#a7f', rusher: '#5da', tumbler: '#fa5', carrier: '#77e' }[e.type];
+  const body = e.red ? '#f55' : { fan: '#7a9', rusher: '#5da', tumbler: '#9a7', carrier: '#687' }[e.type];
   if (e.type === 'carrier') {
+    // バイオメカ風の中型艦
     ctx.fillStyle = body;
     ctx.beginPath();
     ctx.ellipse(0, 0, 24, 15, 0, 0, Math.PI * 2);
     ctx.fill();
-    ctx.fillStyle = '#aaf';
+    ctx.fillStyle = '#354';
     ctx.beginPath();
-    ctx.ellipse(-4, -4, 10, 6, 0, 0, Math.PI * 2);
+    ctx.ellipse(6, 0, 12, 9, 0, 0, Math.PI * 2);
     ctx.fill();
-    ctx.fillStyle = game.frame % 20 < 10 ? '#ff0' : '#f80';
-    ctx.fillRect(-20, 10, 6, 3); ctx.fillRect(14, 10, 6, 3);
+    ctx.fillStyle = game.frame % 20 < 10 ? '#f44' : '#a22'; // 赤いコア
+    ctx.beginPath(); ctx.arc(6, 0, 5, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#9cb';
+    ctx.fillRect(-22, -10, 8, 3); ctx.fillRect(-22, 7, 8, 3);
   } else {
-    ctx.rotate(e.t * 0.08);
+    ctx.rotate(e.t * 0.06);
     ctx.fillStyle = body;
     ctx.beginPath();
     ctx.moveTo(-11, 0); ctx.lineTo(0, -11); ctx.lineTo(11, 0); ctx.lineTo(0, 11);
     ctx.closePath(); ctx.fill();
-    ctx.fillStyle = '#fff';
+    ctx.fillStyle = e.red ? '#fdd' : '#cfe';
     ctx.beginPath();
     ctx.arc(0, 0, 4, 0, Math.PI * 2);
     ctx.fill();
@@ -448,14 +553,51 @@ function drawEnemy(e) {
 }
 
 // ============================================================
+// アイテム (クリスタル)
+// ============================================================
+const ITEM_DEFS = {
+  force:   { color: '#f80', letter: 'F', label: 'FORCE UP!' },
+  red:     { color: '#f55', letter: 'R', label: 'RED LASER!' },
+  blue:    { color: '#5af', letter: 'B', label: 'BLUE LASER!' },
+  speed:   { color: '#5e5', letter: 'S', label: 'SPEED UP!' },
+  missile: { color: '#c7f', letter: 'M', label: 'MISSILE!' },
+  bit:     { color: '#ccc', letter: 'O', label: 'BIT!' },
+};
+
+function pickDropType() {
+  if (!force.have) return 'force';
+  const pool = [];
+  if (force.level < 3) pool.push('force', 'force');
+  pool.push('red', 'blue');
+  if (player.speed < 6) pool.push('speed');
+  if (!player.hasMissile) pool.push('missile', 'missile');
+  if (player.bits < 2) pool.push('bit', 'bit');
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
+function applyItem(type) {
+  switch (type) {
+    case 'force': force.gain(); break;
+    case 'red':   force.color = 'red'; force.gain(); break;
+    case 'blue':  force.color = 'blue'; force.gain(); break;
+    case 'speed': player.speed = Math.min(player.speed + 0.7, 6); break;
+    case 'missile': player.hasMissile = true; break;
+    case 'bit':   if (player.bits < 2) player.bits++; break;
+  }
+  SFX.powerup();
+  game.flashText = ITEM_DEFS[type].label;
+  game.flashTimer = 60;
+}
+
+// ============================================================
 // ゲーム本体
 // ============================================================
 const game = {
   state: 'title',
-  frame: 0, score: 0, hiScore: parseInt(localStorage.getItem('cg_hiscore') || '0'),
-  lives: 3, difficulty: 0,
-  playerBullets: [], enemyBullets: [], enemies: [], capsules: [], particles: [],
-  stars: [], spawnTimer: 60, carrierTimer: 1500,
+  frame: 0, score: 0, hiScore: parseInt(localStorage.getItem('rf_hiscore') || '0'),
+  lives: 4, difficulty: 0,
+  playerBullets: [], enemyBullets: [], enemies: [], items: [], particles: [],
+  stars: [], spawnTimer: 90, carrierTimer: 1500,
   flashText: '', flashTimer: 0,
 
   init() {
@@ -472,10 +614,10 @@ const game = {
   },
   reset() {
     this.state = 'play';
-    this.score = 0; this.lives = 3; this.frame = 0; this.difficulty = 0;
+    this.score = 0; this.lives = 4; this.frame = 0; this.difficulty = 0;
     this.playerBullets = []; this.enemyBullets = []; this.enemies = [];
-    this.capsules = []; this.particles = [];
-    this.spawnTimer = 60; this.carrierTimer = 1200;
+    this.items = []; this.particles = [];
+    this.spawnTimer = 90; this.carrierTimer = 1200;
     this.flashTimer = 0;
     player.reset(true);
   },
@@ -483,27 +625,27 @@ const game = {
     this.score += n;
     if (this.score > this.hiScore) {
       this.hiScore = this.score;
-      localStorage.setItem('cg_hiscore', String(this.hiScore));
+      localStorage.setItem('rf_hiscore', String(this.hiScore));
     }
   },
 
   spawnWave() {
     const roll = Math.random();
-    const y = rand(60, H - HUD_H - 60);
+    const y = rand(80, H - HUD_H - 60);
     if (roll < 0.4) {
-      // 編隊 (2割で赤編隊 = カプセル持ち)
-      const red = Math.random() < 0.35;
-      const n = 5;
+      // 編隊 (4割で赤編隊 = クリスタル持ち)
+      const red = Math.random() < 0.4;
+      const n = 4;
       for (let i = 0; i < n; i++) {
         setTimeout(() => {
           if (this.state === 'play') spawnEnemy('fan', W + 30, y, { red, phase: 0 });
-        }, i * 220);
+        }, i * 250);
       }
     } else if (roll < 0.7) {
-      spawnEnemy('rusher', W + 30, y, { red: Math.random() < 0.25 });
-      if (this.difficulty > 1) spawnEnemy('rusher', W + 70, clamp(y + rand(-80, 80), 40, H - HUD_H - 40));
+      spawnEnemy('rusher', W + 30, y, { red: Math.random() < 0.3 });
+      if (this.difficulty > 1.5) spawnEnemy('rusher', W + 70, clamp(y + rand(-80, 80), 50, H - HUD_H - 40));
     } else {
-      spawnEnemy('tumbler', W + 30, y, { red: Math.random() < 0.25 });
+      spawnEnemy('tumbler', W + 30, y, { red: Math.random() < 0.3 });
     }
   },
 
@@ -516,24 +658,46 @@ const game = {
     }
     if (this.state !== 'play') return;
 
-    this.difficulty = Math.min(this.frame / 1800, 5); // 30秒ごとに難度+1
+    this.difficulty = Math.min(this.frame / 2700, 3); // 45秒ごとに難度+1 (最大3)
     player.update();
+    force.update();
 
     // 敵スポーン
     if (--this.spawnTimer <= 0) {
       this.spawnWave();
-      this.spawnTimer = Math.max(30, 90 - this.difficulty * 12);
+      this.spawnTimer = Math.max(50, 110 - this.difficulty * 15);
     }
     if (--this.carrierTimer <= 0) {
-      spawnEnemy('carrier', W + 40, rand(80, H - HUD_H - 80));
-      this.carrierTimer = 1300;
+      spawnEnemy('carrier', W + 40, rand(100, H - HUD_H - 80));
+      this.carrierTimer = 1500;
     }
 
     // 自弾
     for (const b of this.playerBullets) {
+      if (b.type === 'missile') {
+        // ゆるい追尾
+        let nearest = null, nd = 1e9;
+        for (const e of this.enemies) {
+          if (e.dead || e.x < b.x) continue;
+          const d = dist2(b, e);
+          if (d < nd) { nd = d; nearest = e; }
+        }
+        if (nearest) {
+          const ang = Math.atan2(nearest.y - b.y, nearest.x - b.x);
+          const cur = Math.atan2(b.vy, b.vx);
+          let diff = ang - cur;
+          while (diff > Math.PI) diff -= Math.PI * 2;
+          while (diff < -Math.PI) diff += Math.PI * 2;
+          const na = cur + clamp(diff, -0.06, 0.06);
+          const sp = Math.min(Math.hypot(b.vx, b.vy) + 0.15, 8);
+          b.vx = Math.cos(na) * sp; b.vy = Math.sin(na) * sp;
+        }
+      }
       b.x += b.vx; b.y += b.vy;
-      if (b.type === 'missile') b.vy += 0.12;
-      if (b.x > W + 40 || b.y > H || b.y < -20) b.dead = true;
+      if (b.type === 'blue' && b.bounces > 0) {
+        if (b.y < 30 || b.y > H - HUD_H - 8) { b.vy *= -1; b.bounces--; spawnParticles(b.x, b.y, 3, '#5af'); }
+      }
+      if (b.x > W + 60 || b.x < -30 || b.y > H + 20 || b.y < -20) b.dead = true;
     }
     // 敵弾
     for (const b of this.enemyBullets) {
@@ -542,9 +706,9 @@ const game = {
     }
     // 敵
     for (const e of this.enemies) updateEnemy(e);
-    // カプセル
-    for (const c of this.capsules) {
-      c.x -= 1.2;
+    // アイテム
+    for (const c of this.items) {
+      c.x -= 1.0;
       c.t++;
       if (c.x < -20) c.dead = true;
     }
@@ -560,9 +724,19 @@ const game = {
     this.playerBullets = this.playerBullets.filter(b => !b.dead);
     this.enemyBullets = this.enemyBullets.filter(b => !b.dead);
     this.enemies = this.enemies.filter(e => !e.dead);
-    this.capsules = this.capsules.filter(c => !c.dead);
+    this.items = this.items.filter(c => !c.dead);
     this.particles = this.particles.filter(p => p.life > 0);
     if (this.flashTimer > 0) this.flashTimer--;
+  },
+
+  killEnemy(e) {
+    e.dead = true;
+    this.addScore(e.score);
+    spawnParticles(e.x, e.y, e.type === 'carrier' ? 35 : 14, e.red ? '#f66' : '#cfa');
+    if (e.type === 'carrier') SFX.bigBoom(); else SFX.boom();
+    if (e.red || e.type === 'carrier') {
+      this.items.push({ x: e.x, y: e.y, t: 0, dead: false, type: pickDropType() });
+    }
   },
 
   collide() {
@@ -571,105 +745,195 @@ const game = {
       if (b.dead) continue;
       for (const e of this.enemies) {
         if (e.dead) continue;
-        const rr = (e.r + 6) ** 2;
+        const rr = (e.r + (b.type === 'beam' ? b.w / 2 : 6)) ** 2;
         if (dist2(b, e) < rr) {
+          let dmg = 1;
           if (b.type === 'laser') {
             if (b.hitSet.has(e)) continue;
-            b.hitSet.add(e);
+            b.hitSet.add(e); dmg = 2;
+          } else if (b.type === 'beam') {
+            if (b.hitSet.has(e)) continue;
+            b.hitSet.add(e); dmg = b.dmg;
+          } else if (b.type === 'missile') {
+            dmg = 2; b.dead = true;
+          } else if (b.type === 'blue') {
+            dmg = 1.5; b.dead = true;
           } else {
             b.dead = true;
           }
-          e.hp -= b.type === 'laser' ? 2 : 1;
+          e.hp -= dmg;
           spawnParticles(b.x, b.y, 3, '#ff8');
-          if (e.hp <= 0) {
-            e.dead = true;
-            this.addScore(e.score);
-            spawnParticles(e.x, e.y, e.type === 'carrier' ? 35 : 14, e.red ? '#f66' : '#fc6');
-            if (e.type === 'carrier') SFX.bigBoom(); else SFX.boom();
-            if (e.red || e.type === 'carrier') {
-              this.capsules.push({ x: e.x, y: e.y, t: 0, dead: false });
-            }
-          }
+          if (e.hp <= 0) this.killEnemy(e);
           if (b.dead) break;
         }
       }
     }
-    // プレイヤー vs 敵弾・敵・カプセル
+    // フォース: 敵弾を防ぎ、敵に体当たりダメージ
+    if (force.have) {
+      for (const b of this.enemyBullets) {
+        if (!b.dead && dist2(b, force) < 17 ** 2) {
+          b.dead = true;
+          spawnParticles(b.x, b.y, 4, '#fa5');
+        }
+      }
+      for (const e of this.enemies) {
+        if (!e.dead && dist2(e, force) < (e.r + 12) ** 2) {
+          e.hp -= 0.25;
+          if (this.frame % 5 === 0) spawnParticles(force.x + 8, force.y, 2, '#fc6');
+          if (e.hp <= 0) this.killEnemy(e);
+        }
+      }
+    }
+    // プレイヤー vs 敵弾・敵・アイテム
     if (player.alive) {
       const pr = { x: player.x, y: player.y };
       for (const b of this.enemyBullets) {
-        if (!b.dead && dist2(b, pr) < (player.r + 4) ** 2) {
+        if (!b.dead && dist2(b, pr) < (player.r + 3) ** 2) {
           b.dead = true;
           player.hit();
         }
       }
       for (const e of this.enemies) {
-        if (!e.dead && dist2(e, pr) < (player.r + e.r) ** 2) {
+        if (!e.dead && dist2(e, pr) < (player.r + e.r - 3) ** 2) {
           e.hp -= 3;
-          if (e.hp <= 0) { e.dead = true; spawnParticles(e.x, e.y, 12, '#fc6'); }
+          if (e.hp <= 0) { e.dead = true; spawnParticles(e.x, e.y, 12, '#cfa'); }
           player.hit();
         }
       }
-      for (const c of this.capsules) {
-        if (!c.dead && dist2(c, pr) < 24 ** 2) {
+      for (const c of this.items) {
+        if (!c.dead && dist2(c, pr) < 26 ** 2) {
           c.dead = true;
-          player.gauge = player.gauge % POWER_SLOTS.length + 1;
+          applyItem(c.type);
           SFX.pickup();
           this.addScore(500);
-          spawnParticles(c.x, c.y, 10, '#fd4');
+          spawnParticles(c.x, c.y, 10, ITEM_DEFS[c.type].color);
         }
       }
     }
   },
 
   // ---------- 描画 ----------
+  drawTerrain() {
+    // バイオメカ風の天井と床
+    const t = this.frame * 1.1;
+    ctx.fillStyle = '#0d2224';
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    for (let x = 0; x <= W; x += 16) {
+      const h = 22 + Math.sin((x + t) * 0.013) * 9 + Math.sin((x + t) * 0.037) * 5;
+      ctx.lineTo(x, h);
+    }
+    ctx.lineTo(W, 0);
+    ctx.closePath(); ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(0, H - HUD_H);
+    for (let x = 0; x <= W; x += 16) {
+      const h = 16 + Math.sin((x + t) * 0.011 + 9) * 8 + Math.sin((x + t) * 0.031 + 4) * 4;
+      ctx.lineTo(x, H - HUD_H - h);
+    }
+    ctx.lineTo(W, H - HUD_H);
+    ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = '#1e4a44';
+    ctx.beginPath();
+    for (let x = 0; x <= W; x += 16) {
+      const h = 22 + Math.sin((x + t) * 0.013) * 9 + Math.sin((x + t) * 0.037) * 5;
+      x === 0 ? ctx.moveTo(x, h) : ctx.lineTo(x, h);
+    }
+    ctx.stroke();
+    ctx.beginPath();
+    for (let x = 0; x <= W; x += 16) {
+      const h = 16 + Math.sin((x + t) * 0.011 + 9) * 8 + Math.sin((x + t) * 0.031 + 4) * 4;
+      x === 0 ? ctx.moveTo(x, H - HUD_H - h) : ctx.lineTo(x, H - HUD_H - h);
+    }
+    ctx.stroke();
+  },
+
   draw() {
-    ctx.fillStyle = '#020210';
+    ctx.fillStyle = '#020c10';
     ctx.fillRect(0, 0, W, H);
     // 星
     for (const s of this.stars) {
       const b = 0.3 + s.z * 0.7;
-      ctx.fillStyle = `rgba(${180 + s.z * 75},${190 + s.z * 65},255,${b})`;
+      ctx.fillStyle = `rgba(${160 + s.z * 60},${200 + s.z * 55},235,${b})`;
       ctx.fillRect(s.x, s.y, s.z > 0.7 ? 2 : 1, s.z > 0.7 ? 2 : 1);
     }
 
     if (this.state === 'title') { this.drawTitle(); return; }
 
-    // カプセル
-    for (const c of this.capsules) {
+    this.drawTerrain();
+
+    // アイテム (クリスタル)
+    for (const c of this.items) {
+      const def = ITEM_DEFS[c.type];
       const blink = Math.floor(c.t / 6) % 2 === 0;
       ctx.save();
       ctx.translate(c.x, c.y + Math.sin(c.t * 0.1) * 3);
-      ctx.fillStyle = blink ? '#f80' : '#fc0';
+      ctx.rotate(Math.sin(c.t * 0.05) * 0.3);
+      ctx.fillStyle = blink ? def.color : '#fff';
       ctx.strokeStyle = '#fff';
-      ctx.lineWidth = 2;
+      ctx.lineWidth = 1.5;
       ctx.beginPath();
-      ctx.roundRect(-11, -7, 22, 14, 7);
-      ctx.fill(); ctx.stroke();
-      ctx.fillStyle = '#fff';
+      ctx.moveTo(0, -12); ctx.lineTo(9, 0); ctx.lineTo(0, 12); ctx.lineTo(-9, 0);
+      ctx.closePath(); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = blink ? '#fff' : '#000';
       ctx.font = 'bold 10px monospace';
       ctx.textAlign = 'center';
-      ctx.fillText('P', 0, 4);
+      ctx.fillText(def.letter, 0, 4);
       ctx.restore();
     }
 
     // 自弾
     for (const b of this.playerBullets) {
-      if (b.type === 'laser') {
-        ctx.fillStyle = '#6df';
-        ctx.fillRect(b.x - 20, b.y - 2, 36, 4);
-        ctx.fillStyle = '#fff';
-        ctx.fillRect(b.x - 20, b.y - 1, 36, 2);
-      } else if (b.type === 'missile') {
-        ctx.fillStyle = '#faa';
-        ctx.beginPath();
-        ctx.arc(b.x, b.y, 3.5, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.fillStyle = '#f80';
-        ctx.fillRect(b.x - 7, b.y - 1.5, 5, 3);
-      } else {
-        ctx.fillStyle = '#ffd';
-        ctx.fillRect(b.x - 6, b.y - 2, 12, 4);
+      switch (b.type) {
+        case 'laser':
+          ctx.fillStyle = '#f6a';
+          ctx.fillRect(b.x - 20, b.y - 2, 36, 4);
+          ctx.fillStyle = '#fff';
+          ctx.fillRect(b.x - 20, b.y - 1, 36, 2);
+          break;
+        case 'blue':
+          ctx.save();
+          ctx.translate(b.x, b.y);
+          ctx.rotate(Math.atan2(b.vy, b.vx));
+          ctx.fillStyle = '#5af';
+          ctx.fillRect(-14, -2, 24, 4);
+          ctx.fillStyle = '#cef';
+          ctx.fillRect(-14, -1, 24, 2);
+          ctx.restore();
+          break;
+        case 'missile':
+          ctx.save();
+          ctx.translate(b.x, b.y);
+          ctx.rotate(Math.atan2(b.vy, b.vx));
+          ctx.fillStyle = '#ddd';
+          ctx.fillRect(-6, -2, 12, 4);
+          ctx.fillStyle = '#f44';
+          ctx.beginPath();
+          ctx.moveTo(6, -2); ctx.lineTo(10, 0); ctx.lineTo(6, 2);
+          ctx.closePath(); ctx.fill();
+          ctx.fillStyle = game.frame % 4 < 2 ? '#fa0' : '#f70';
+          ctx.beginPath();
+          ctx.moveTo(-6, -2); ctx.lineTo(-11, 0); ctx.lineTo(-6, 2);
+          ctx.closePath(); ctx.fill();
+          ctx.restore();
+          break;
+        case 'beam': {
+          const grad = ctx.createLinearGradient(b.x - 50, 0, b.x + 20, 0);
+          grad.addColorStop(0, 'rgba(80,180,255,0)');
+          grad.addColorStop(1, 'rgba(140,220,255,0.9)');
+          ctx.fillStyle = grad;
+          ctx.fillRect(b.x - 50, b.y - b.w / 2, 70, b.w);
+          ctx.fillStyle = '#fff';
+          ctx.fillRect(b.x - 50, b.y - b.w / 6, 70, b.w / 3);
+          break;
+        }
+        case 'fshot':
+          ctx.fillStyle = '#fc6';
+          ctx.fillRect(b.x - 5, b.y - 2, 10, 4);
+          break;
+        default:
+          ctx.fillStyle = '#ffd';
+          ctx.fillRect(b.x - 6, b.y - 2, 12, 4);
       }
     }
     // 敵弾
@@ -681,6 +945,7 @@ const game = {
     }
 
     for (const e of this.enemies) drawEnemy(e);
+    force.draw();
     player.draw();
 
     // パーティクル
@@ -729,37 +994,48 @@ const game = {
       ctx.save();
       ctx.translate(W - 30 - i * 26, 15);
       ctx.scale(0.7, 0.7);
-      ctx.fillStyle = '#8cf';
+      ctx.fillStyle = '#dde4ee';
       ctx.beginPath();
       ctx.moveTo(12, 0); ctx.lineTo(-8, -7); ctx.lineTo(-8, 7);
       ctx.closePath(); ctx.fill();
       ctx.restore();
     }
 
-    // 下部: パワーゲージ
-    ctx.fillStyle = '#101028';
+    // 下部: 波動砲ゲージ + 装備
+    ctx.fillStyle = '#101a28';
     ctx.fillRect(0, H - HUD_H, W, HUD_H);
     ctx.strokeStyle = '#334';
     ctx.strokeRect(0.5, H - HUD_H + 0.5, W - 1, HUD_H - 1);
-    const slotW = 110, gap = 8;
-    const totalW = POWER_SLOTS.length * slotW + (POWER_SLOTS.length - 1) * gap;
-    const startX = (W - totalW) / 2;
+
+    // BEAMゲージ
     ctx.font = 'bold 13px monospace';
-    ctx.textAlign = 'center';
-    POWER_SLOTS.forEach((name, i) => {
-      const x = startX + i * (slotW + gap);
-      const selected = player.gauge === i + 1;
-      ctx.fillStyle = selected
-        ? (this.frame % 20 < 10 ? '#fa0' : '#fc4')
-        : '#1a1a3a';
-      ctx.beginPath();
-      ctx.roundRect(x, H - HUD_H + 7, slotW, HUD_H - 14, 4);
-      ctx.fill();
-      ctx.strokeStyle = selected ? '#ff8' : '#446';
-      ctx.stroke();
-      ctx.fillStyle = selected ? '#000' : '#9ab';
-      ctx.fillText(name, x + slotW / 2, H - HUD_H / 2 + 4);
-    });
+    ctx.fillStyle = '#8cf';
+    ctx.fillText('BEAM', 14, H - HUD_H / 2 + 5);
+    const gx = 62, gw = 240, gh = 14;
+    ctx.fillStyle = '#0a1220';
+    ctx.fillRect(gx, H - HUD_H / 2 - gh / 2, gw, gh);
+    ctx.strokeStyle = '#456';
+    ctx.strokeRect(gx + 0.5, H - HUD_H / 2 - gh / 2 + 0.5, gw, gh);
+    const pow = player.charge / CHARGE_MAX;
+    if (pow > 0) {
+      const full = pow >= 1;
+      ctx.fillStyle = full ? (this.frame % 10 < 5 ? '#fff' : '#8df') : '#38a';
+      ctx.fillRect(gx + 1, H - HUD_H / 2 - gh / 2 + 1, (gw - 2) * pow, gh - 2);
+    }
+
+    // 装備アイコン
+    ctx.textAlign = 'left';
+    let ix = gx + gw + 24;
+    const iy = H - HUD_H / 2 + 5;
+    const drawTag = (text, on, color) => {
+      ctx.fillStyle = on ? color : '#3a4455';
+      ctx.fillText(text, ix, iy);
+      ix += ctx.measureText(text).width + 18;
+    };
+    drawTag(`FORCE${force.have ? ' L' + force.level : ''}`, force.have, force.color === 'red' ? '#f88' : '#8cf');
+    drawTag(`SPD ${player.speed.toFixed(1)}`, player.speed > 3.4, '#8e8');
+    drawTag('MSL', player.hasMissile, '#d9f');
+    drawTag(`BIT×${player.bits}`, player.bits > 0, '#dde');
   },
 
   drawTitle() {
@@ -767,25 +1043,26 @@ const game = {
     const t = this.frame;
     // タイトルロゴ
     ctx.save();
-    ctx.translate(W / 2, 130 + Math.sin(t * 0.03) * 6);
+    ctx.translate(W / 2, 120 + Math.sin(t * 0.03) * 6);
     ctx.fillStyle = '#4df';
-    ctx.font = 'bold 52px monospace';
-    ctx.fillText('COSMIC GRADIUS', 0, 0);
+    ctx.font = 'bold 64px monospace';
+    ctx.fillText('R-FORCE', 0, 0);
     ctx.fillStyle = 'rgba(140,200,255,0.35)';
-    ctx.fillText('COSMIC GRADIUS', 3, 3);
+    ctx.fillText('R-FORCE', 3, 3);
     ctx.restore();
     ctx.fillStyle = '#fc6';
     ctx.font = '16px monospace';
-    ctx.fillText('- パワーアップ横スクロールシューティング -', W / 2, 175);
+    ctx.fillText('- 波動砲とフォースの横スクロールシューティング -', W / 2, 165);
 
     ctx.fillStyle = '#fff';
     ctx.font = '15px monospace';
-    ctx.fillText('移動: 矢印キー / WASD', W / 2, 240);
-    ctx.fillText('ショット: Z または スペース', W / 2, 265);
-    ctx.fillText('パワーアップ発動: X または Shift', W / 2, 290);
+    ctx.fillText('移動: 矢印キー / WASD', W / 2, 225);
+    ctx.fillText('ショット: Z / スペース (長押しで波動砲チャージ)', W / 2, 250);
+    ctx.fillText('フォース切り離し・回収: X / Shift', W / 2, 275);
     ctx.fillStyle = '#fc0';
     ctx.font = '14px monospace';
-    ctx.fillText('赤い敵を倒してカプセルを集め、Xでパワーアップ!', W / 2, 330);
+    ctx.fillText('赤い敵からクリスタルが出現!', W / 2, 315);
+    ctx.fillText('F=フォース  R/B=レーザー  S=スピード  M=ミサイル  O=ビット', W / 2, 337);
 
     if (t % 60 < 40) {
       ctx.fillStyle = '#8f8';
