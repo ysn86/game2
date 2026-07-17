@@ -104,7 +104,7 @@ const HABU_TYPE = -2;   // おじゃまツム(ハブ)。つなげない。シャ
 const HABU_MAX = 3;     // 画面内のハブ上限
 const COMBO_WINDOW = 2.5;   // コンボが途切れるまでの秒数
 const COMBO_MULT_MAX = 3;   // コンボ倍率の上限
-const RHYTHM_WINDOW = 0.09; // エイサーリズムボーナスの判定幅(秒)
+const RHYTHM_WINDOW = 0.12; // エイサーリズムボーナスの判定幅(秒)
 
 // ---------- 状態 ----------
 let state = 'title';   // title / play / result
@@ -377,6 +377,8 @@ const SKILLS = [
 ];
 let skillGauge = [0, 0, 0, 0, 0];
 let skillFlashT = 0;
+let skillWasReady = [false, false, false, false, false];
+let howtoPage = 0;
 
 // =========================================================
 // サウンド(Web Audio・琉球音階)
@@ -552,6 +554,11 @@ function seSkill() {
   const t = AC.currentTime;
   [72, 79, 84, 91].forEach((m, i) => pluck(m, t + i * 0.06, 0.5));
   drum(t, 120, 0.6);
+}
+function seReady() {
+  if (!AC) return;
+  const t = AC.currentTime;
+  [84, 91, 96].forEach((m, i) => pluck(m, t + i * 0.08, 0.5));
 }
 
 // =========================================================
@@ -1161,6 +1168,7 @@ function drawHUD() {
 
   drawSkillIcons();
   drawCombo();
+  drawTaiko();
   ctx.restore();
 }
 
@@ -1195,13 +1203,69 @@ function drawSkillIcons() {
     ctx.stroke();
     if (ready) {
       ctx.fillStyle = '#e8734a';
-      ctx.font = 'bold 10px sans-serif'; ctx.textAlign = 'center';
+      ctx.font = 'bold 11px sans-serif'; ctx.textAlign = 'center';
       ctx.strokeStyle = '#fff'; ctx.lineWidth = 3;
-      ctx.strokeText('タップ!', 0, p.r + 14);
-      ctx.fillText('タップ!', 0, p.r + 14);
+      ctx.strokeText('タップ!', 0, p.r + 16);
+      ctx.fillText('タップ!', 0, p.r + 16);
+      // ぴょこぴょこ動く矢印
+      const bob = Math.abs(Math.sin(globalT * 6)) * 8;
+      ctx.fillStyle = '#ffd23e';
+      ctx.strokeStyle = 'rgba(232,115,74,0.9)'; ctx.lineWidth = 2; ctx.lineJoin = 'round';
+      ctx.beginPath();
+      ctx.moveTo(0, -p.r - 8 - bob);
+      ctx.lineTo(-9, -p.r - 22 - bob);
+      ctx.lineTo(9, -p.r - 22 - bob);
+      ctx.closePath();
+      ctx.fill(); ctx.stroke();
     }
     ctx.restore();
   }
+}
+
+// エイサー太鼓(ビートに合わせて脈打つ。ドン♪のときに指を離すとボーナス)
+function drawTaiko() {
+  if (!AC || beatInt <= 0 || !bgmTimer) return;
+  const phase = ((AC.currentTime - beatRef) % beatInt + beatInt) % beatInt;
+  const hit = Math.max(0, 1 - phase / 0.16);   // ビート直後にふくらむ
+  const inWindow = Math.min(phase, beatInt - phase) < RHYTHM_WINDOW;
+  const x = 44, y = 178;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(1 + hit * 0.25, 1 + hit * 0.25);
+  if (inWindow) { ctx.shadowColor = '#ffd23e'; ctx.shadowBlur = 18; }
+  // 胴
+  ctx.fillStyle = '#c1443a';
+  ctx.beginPath(); ctx.arc(0, 0, 24, 0, Math.PI * 2); ctx.fill();
+  ctx.shadowBlur = 0;
+  // 皮
+  ctx.fillStyle = '#f7ead8';
+  ctx.beginPath(); ctx.arc(0, 0, 18, 0, Math.PI * 2); ctx.fill();
+  // 鋲
+  ctx.fillStyle = '#8a2f28';
+  for (let i = 0; i < 8; i++) {
+    const a = i * Math.PI / 4;
+    ctx.beginPath(); ctx.arc(Math.cos(a) * 21, Math.sin(a) * 21, 2.2, 0, Math.PI * 2); ctx.fill();
+  }
+  // 巴もよう
+  ctx.fillStyle = '#c1443a';
+  ctx.beginPath(); ctx.arc(0, 0, 6, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+  // ラベルとドン♪
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.font = 'bold 11px sans-serif';
+  ctx.strokeStyle = 'rgba(0,0,0,0.3)'; ctx.lineWidth = 3;
+  ctx.fillStyle = '#fff';
+  ctx.strokeText('リズム', x, y + 42);
+  ctx.fillText('リズム', x, y + 42);
+  if (hit > 0.1) {
+    ctx.globalAlpha = hit;
+    ctx.font = 'bold 16px sans-serif';
+    ctx.fillStyle = '#ffd23e';
+    ctx.strokeText('ドン♪', x + 32, y - 18);
+    ctx.fillText('ドン♪', x + 32, y - 18);
+  }
+  ctx.restore();
 }
 
 // コンボ表示(タイマーの下)
@@ -1296,18 +1360,131 @@ function drawTitle() {
   ctx.fillText('タップで はじめる!', W / 2, 640);
   ctx.globalAlpha = 1;
 
-  // ランキングボタン
+  // ランキング・あそびかたボタン
   ctx.fillStyle = 'rgba(255,255,255,0.85)';
   roundRect(RANK_BTN_TITLE.x, RANK_BTN_TITLE.y, RANK_BTN_TITLE.w, RANK_BTN_TITLE.h, 12); ctx.fill();
+  roundRect(HOWTO_BTN_TITLE.x, HOWTO_BTN_TITLE.y, HOWTO_BTN_TITLE.w, HOWTO_BTN_TITLE.h, 12); ctx.fill();
   ctx.fillStyle = '#215a6b';
   ctx.font = 'bold 15px sans-serif';
   ctx.fillText('🏆 ランキング', RANK_BTN_TITLE.x + RANK_BTN_TITLE.w / 2, RANK_BTN_TITLE.y + 25);
+  ctx.fillText('❓ あそびかた', HOWTO_BTN_TITLE.x + HOWTO_BTN_TITLE.w / 2, HOWTO_BTN_TITLE.y + 25);
   ctx.restore();
 }
 
 const RANK_BTN_TITLE = { x: 12, y: 12, w: 130, h: 38 };
+const HOWTO_BTN_TITLE = { x: 12, y: 56, w: 130, h: 38 };
 const RANK_BTN_RESULT = { x: W / 2 - 90, y: 585, w: 180, h: 46 };
+const HOWTO_NEXT_BTN = { x: W / 2 - 110, y: 612, w: 220, h: 54 };
 function inRect(p, r) { return p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h; }
+
+// ---------- あそびかた説明 ----------
+function drawMiniTsum(i, x, y, s) {
+  const spr = i === HABU_TYPE ? HABU_SPRITE : SPRITES[i];
+  ctx.drawImage(spr, x - s / 2, y - s / 2, s, s);
+}
+
+function howtoItem(y, title, lines) {
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#e8734a';
+  ctx.font = 'bold 17px sans-serif';
+  ctx.fillText(title, 118, y);
+  ctx.fillStyle = '#215a6b';
+  ctx.font = '13.5px sans-serif';
+  lines.forEach((ln, i) => ctx.fillText(ln, 118, y + 22 + i * 19));
+}
+
+function drawHowto() {
+  drawBG();
+  ctx.save();
+  ctx.fillStyle = 'rgba(20,60,80,0.45)'; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = 'rgba(255,255,255,0.95)';
+  roundRect(24, 56, W - 48, 530, 24); ctx.fill();
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#e8734a';
+  ctx.font = 'bold 28px sans-serif';
+  ctx.fillText(howtoPage === 0 ? 'あそびかた ①' : 'あそびかた ②', W / 2, 100);
+
+  if (howtoPage === 0) {
+    // ① なぞって消す
+    let y = 150;
+    for (let k = 0; k < 3; k++) drawMiniTsum(0, 48 + k * 26, y + 8, 40);
+    ctx.strokeStyle = 'rgba(232,115,74,0.6)'; ctx.lineWidth = 5; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(48, y + 8); ctx.lineTo(100, y + 8); ctx.stroke();
+    howtoItem(y, 'なぞって けす', ['おなじ なかまを 3こいじょう', 'ゆびで なぞって つなげよう!']);
+    // ② コンボ
+    y = 255;
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#fff';
+    ctx.strokeStyle = 'rgba(232,115,74,0.9)'; ctx.lineWidth = 5; ctx.lineJoin = 'round';
+    ctx.font = 'bold 26px sans-serif';
+    ctx.strokeText('5', 74, y + 10); ctx.fillText('5', 74, y + 10);
+    ctx.font = 'bold 12px sans-serif';
+    ctx.strokeText('コンボ', 74, y + 26); ctx.fillText('コンボ', 74, y + 26);
+    howtoItem(y, 'コンボで スコアアップ', ['つづけて けすと コンボが つながって', 'スコアの ばいりつが あがるよ (さいだい x3)']);
+    // ③ フィーバー
+    y = 360;
+    ctx.fillStyle = 'rgba(0,0,0,0.18)';
+    roundRect(38, y - 4, 70, 16, 8); ctx.fill();
+    const g = ctx.createLinearGradient(38, 0, 108, 0);
+    g.addColorStop(0, '#ffd23e'); g.addColorStop(1, '#ff7e5f');
+    ctx.fillStyle = g;
+    roundRect(38, y - 4, 52, 16, 8); ctx.fill();
+    howtoItem(y, 'カチャーシーフィーバー', ['たくさん けして ゲージ まんたんで', 'フィーバー! スコア2ばい & じかん +3びょう']);
+    // ④ シャボン玉
+    y = 465;
+    ctx.fillStyle = 'rgba(174,233,255,0.5)';
+    ctx.beginPath(); ctx.arc(74, y + 4, 22, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.9)'; ctx.lineWidth = 2; ctx.stroke();
+    ctx.fillStyle = 'rgba(255,235,140,0.95)';
+    drawStar(74, y + 4, 9);
+    howtoItem(y, 'シャボンだま', ['7こいじょう つなぐと シャボンだまが でるよ', 'タップすると まわりを まとめて ドカン!']);
+  } else {
+    // ⑤ スキル
+    let y = 145;
+    drawMiniTsum(0, 60, y + 6, 42);
+    ctx.strokeStyle = '#ffb13e'; ctx.lineWidth = 4; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.arc(60, y + 6, 25, -Math.PI / 2, Math.PI); ctx.stroke();
+    howtoItem(y, 'キャラスキル', ['けした キャラの ゲージが うえの アイコンに たまる', 'ひかったら タップで スキル はつどう!', 'シーサー:たてれつ ゴーヤ:ゲージ ジンベエ:したの だん', 'ハイビ:へんしん カメ:じかん+3びょう']);
+    // ⑥ エイサーリズム
+    y = 275;
+    ctx.fillStyle = '#c1443a';
+    ctx.beginPath(); ctx.arc(64, y + 6, 20, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#f7ead8';
+    ctx.beginPath(); ctx.arc(64, y + 6, 15, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#c1443a';
+    ctx.beginPath(); ctx.arc(64, y + 6, 5, 0, Math.PI * 2); ctx.fill();
+    howtoItem(y, 'エイサーリズムボーナス', ['ひだりの たいこが ドン♪と なるのに あわせて', 'ゆびを はなすと「ハイサイ!」 スコア x1.3!']);
+    // ⑦ 台風
+    y = 380;
+    ctx.textAlign = 'center';
+    ctx.font = '34px sans-serif';
+    ctx.fillText('🌀', 64, y + 16);
+    howtoItem(y, 'たいふう', ['とつぜん たいふうが きて ツムが まいあがる!', 'ばんめんが シャッフルされる チャンス!']);
+    // ⑧ ハブ
+    y = 480;
+    drawMiniTsum(HABU_TYPE, 64, y + 6, 44);
+    howtoItem(y, 'おじゃまツム 「ハブ」', ['ハブは つなげられない!', 'シャボンだまか シーサーの スキルで たいじ (+500てん)']);
+  }
+
+  // ページ送りボタン
+  const last = howtoPage === 1;
+  ctx.fillStyle = '#fff';
+  roundRect(HOWTO_NEXT_BTN.x, HOWTO_NEXT_BTN.y, HOWTO_NEXT_BTN.w, HOWTO_NEXT_BTN.h, 16); ctx.fill();
+  const bg = ctx.createLinearGradient(0, HOWTO_NEXT_BTN.y, 0, HOWTO_NEXT_BTN.y + HOWTO_NEXT_BTN.h);
+  bg.addColorStop(0, '#ffb13e'); bg.addColorStop(1, '#e8734a');
+  ctx.fillStyle = bg;
+  roundRect(HOWTO_NEXT_BTN.x + 3, HOWTO_NEXT_BTN.y + 3, HOWTO_NEXT_BTN.w - 6, HOWTO_NEXT_BTN.h - 6, 13); ctx.fill();
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 22px sans-serif';
+  ctx.fillText(last ? 'スタート!' : 'つぎへ →', W / 2, HOWTO_NEXT_BTN.y + 36);
+  // ページドット
+  for (let i = 0; i < 2; i++) {
+    ctx.fillStyle = i === howtoPage ? '#e8734a' : 'rgba(255,255,255,0.7)';
+    ctx.beginPath(); ctx.arc(W / 2 + (i - 0.5) * 20, 600, 5, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.restore();
+}
 
 // ランキング画面
 function drawRanking() {
@@ -1423,6 +1600,7 @@ function startGame() {
   playElapsed = 0;
   skillGauge = [0, 0, 0, 0, 0];
   skillFlashT = 0;
+  skillWasReady = [false, false, false, false, false];
   typhoon = { state: 'none', t: 0, at: 15 + Math.random() * 20, done: false };
   pendingRank = false;
   newRankIdx = -1;
@@ -1491,6 +1669,19 @@ function update(dt) {
   if (comboPopT > 0) comboPopT -= dt;
   if (skillFlashT > 0) skillFlashT -= dt;
 
+  // スキルが使えるようになった瞬間を大きくお知らせ
+  for (let i = 0; i < 5; i++) {
+    const ready = skillGauge[i] >= SKILL_NEED;
+    if (ready && !skillWasReady[i]) {
+      skillWasReady[i] = true;
+      seReady();
+      const p = skillIconPos(i);
+      burst(p.x, p.y, CHARS[i].color);
+      floats.push({ x: W / 2, y: 240, text: `${CHARS[i].name}の\nスキル OK! アイコンを タップ!`, life: 1.8, color: '#ffd23e', size: 26 });
+    }
+    if (!ready) skillWasReady[i] = false;
+  }
+
   updateTyphoon(dt);
   physics(dt);
 
@@ -1523,6 +1714,8 @@ function render() {
   }
   if (state === 'title') {
     drawTitle();
+  } else if (state === 'howto') {
+    drawHowto();
   } else if (state === 'ranking') {
     drawRanking();
   } else if (state === 'result') {
@@ -1600,7 +1793,25 @@ canvas.addEventListener('pointerdown', e => {
   pointer = toGame(e);
   if (state === 'title') {
     if (inRect(pointer, RANK_BTN_TITLE)) { state = 'ranking'; return; }
+    if (inRect(pointer, HOWTO_BTN_TITLE)) { howtoPage = 0; state = 'howto'; return; }
+    // はじめてのプレイなら先にあそびかたを見せる
+    if (!localStorage.getItem('churatsum-howto')) {
+      howtoPage = 0;
+      state = 'howto';
+      return;
+    }
     startGame();
+    return;
+  }
+  if (state === 'howto') {
+    if (inRect(pointer, HOWTO_NEXT_BTN)) {
+      if (howtoPage === 0) {
+        howtoPage = 1;
+      } else {
+        localStorage.setItem('churatsum-howto', '1');
+        startGame();
+      }
+    }
     return;
   }
   if (state === 'ranking') { state = 'title'; return; }
