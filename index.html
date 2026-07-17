@@ -54,7 +54,7 @@ const STAGES = {
 const BOSS_DEFS = {
   guard: { hp: 55,  r: 42, name: 'GUARD SHIP' },
   orb:   { hp: 75,  r: 40, name: 'BIO ORB' },
-  core:  { hp: 100, r: 45, name: 'FORTRESS CORE' },
+  core:  { hp: 120, r: 45, name: 'FORTRESS CORE' },
 };
 
 // ============================================================
@@ -132,6 +132,10 @@ const SFX = {
   },
   stageClear() {
     [659, 784, 880, 1047, 1319, 1568].forEach((f, i) => AudioSys.tone(f, 0.14, 'square', 0.13, 0, i * 0.09));
+  },
+  transform() { // ラスボス形態変化
+    AudioSys.noise(0.4, 0.2);
+    [330, 392, 494, 659, 880].forEach((f, i) => AudioSys.tone(f, 0.12, 'sawtooth', 0.12, 200, i * 0.08));
   },
   playerDie() {
     AudioSys.noise(0.6, 0.3);
@@ -629,6 +633,7 @@ function spawnBoss() {
     x: W + 100, y: (H - HUD_H) / 2, r: def.r,
     hp: def.hp, maxHp: def.hp,
     t: 0, entered: false, dying: false,
+    form: 1, transform: 0, spiral: 0, // ラスボスの形態管理
   };
 }
 
@@ -661,18 +666,62 @@ function updateBoss(b) {
       if (b.t % Math.round(120 * iv) === 0) fireRing(b, 8, 1.8, rand(0, 0.8));
       if (b.t % Math.round(90 * iv) === 30) fireAimed(b, 2.4);
       break;
-    case 'core':
-      b.x = W - 120 + Math.sin(b.t * 0.01) * 15;
-      b.y += clamp(player.y - b.y, -1.1, 1.1);
-      if (b.t % Math.round(100 * iv) === 0) {
-        for (let i = -2; i <= 2; i++) fireAimed(b, 2.2, i * 0.22);
+    case 'core': {
+      // ラスボス: HP残量で3形態にパワーアップ
+      const ratio = b.hp / b.maxHp;
+      const form = ratio > 2 / 3 ? 1 : ratio > 1 / 3 ? 2 : 3;
+      if (form !== b.form) {
+        b.form = form;
+        b.transform = 90; // 変身中は無敵
+        game.enemyBullets = [];
+        SFX.transform();
+        game.flashText = form === 2 ? 'PHASE II !' : 'FINAL PHASE !!';
+        game.flashTimer = 80;
       }
-      if (b.t % Math.round(320 * iv) === 100) fireRing(b, 10, 1.9, rand(0, 0.6));
-      if (b.t % 480 === 240) {
-        spawnEnemy('fan', W + 30, rand(80, H - HUD_H - 80));
-        spawnEnemy('fan', W + 60, rand(80, H - HUD_H - 80));
+      if (b.transform > 0) {
+        b.transform--;
+        if (b.transform % 6 === 0) {
+          spawnParticles(b.x + rand(-45, 45), b.y + rand(-45, 45), 6, form === 3 ? '#f44' : '#fa4');
+        }
+        break;
+      }
+      if (b.form === 1) {
+        // 第1形態: 追尾しながら5方向弾
+        b.x = W - 120 + Math.sin(b.t * 0.01) * 15;
+        b.y += clamp(player.y - b.y, -1.0, 1.0);
+        if (b.t % 100 === 0) {
+          for (let i = -2; i <= 2; i++) fireAimed(b, 2.2, i * 0.22);
+        }
+        if (b.t % 320 === 100) fireRing(b, 10, 1.9, rand(0, 0.6));
+      } else if (b.form === 2) {
+        // 第2形態: スパイラル弾 + 雑魚召喚
+        b.x = W - 130 + Math.sin(b.t * 0.02) * 30;
+        b.y += clamp(player.y - b.y, -1.5, 1.5);
+        b.spiral += 0.35;
+        if (b.t % 10 === 0) {
+          game.enemyBullets.push({ x: b.x, y: b.y, vx: Math.cos(b.spiral) * 2.0, vy: Math.sin(b.spiral) * 2.0, dead: false });
+        }
+        if (b.t % 90 === 0) {
+          for (let i = -1; i <= 1; i++) fireAimed(b, 2.4, i * 0.25);
+        }
+        if (b.t % 420 === 200) {
+          spawnEnemy('fan', W + 30, rand(80, H - HUD_H - 80));
+          spawnEnemy('fan', W + 60, rand(80, H - HUD_H - 80));
+        }
+      } else {
+        // 最終形態: 大きく動き回り二重スパイラル + 全方位弾
+        b.x = W - 140 + Math.sin(b.t * 0.03) * 45;
+        b.y = (H - HUD_H) / 2 + Math.sin(b.t * 0.025) * 115;
+        b.spiral += 0.28;
+        if (b.t % 8 === 0) {
+          game.enemyBullets.push({ x: b.x, y: b.y, vx: Math.cos(b.spiral) * 2.1, vy: Math.sin(b.spiral) * 2.1, dead: false });
+          game.enemyBullets.push({ x: b.x, y: b.y, vx: Math.cos(-b.spiral) * 2.1, vy: Math.sin(-b.spiral) * 2.1, dead: false });
+        }
+        if (b.t % 130 === 0) fireRing(b, 12, 2.0, rand(0, 0.5));
+        if (b.t % 70 === 30) fireAimed(b, 2.6);
       }
       break;
+    }
   }
 }
 
@@ -729,11 +778,23 @@ function drawBoss(b) {
       break;
     }
     case 'core': {
-      // 回転する装甲板
-      for (let ring = 2; ring >= 1; ring--) {
+      const form = b.form || 1;
+      const tf = b.transform > 0;
+      const spin = form === 1 ? 0.01 : form === 2 ? 0.025 : 0.045;
+      // 最終形態のオーラ
+      if (form === 3 && !tf) {
+        ctx.fillStyle = `rgba(255,60,30,${0.12 + 0.08 * Math.sin(b.t * 0.15)})`;
+        ctx.beginPath(); ctx.arc(0, 0, 66, 0, Math.PI * 2); ctx.fill();
+      }
+      // 回転する装甲板 (形態が上がるほど増えて速く回る)
+      const outerCol = form === 1 ? '#644' : form === 2 ? '#754' : '#722';
+      const innerCol = form === 1 ? '#866' : form === 2 ? '#a86' : '#a44';
+      const ringCount = form === 3 ? 3 : 2;
+      for (let ring = ringCount; ring >= 1; ring--) {
         const rr = 26 + ring * 14;
-        const rot = b.t * 0.01 * (ring % 2 ? 1 : -1);
-        ctx.fillStyle = flash ? '#b55' : (ring === 2 ? '#644' : '#866');
+        const rot = b.t * spin * (ring % 2 ? 1 : -1);
+        ctx.fillStyle = tf ? (game.frame % 6 < 3 ? '#fff' : '#fca')
+          : flash ? '#b55' : (ring >= 2 ? outerCol : innerCol);
         ctx.beginPath();
         for (let i = 0; i < 6; i++) {
           const a = rot + (Math.PI * 2 / 6) * i;
@@ -744,15 +805,26 @@ function drawBoss(b) {
         ctx.strokeStyle = '#321';
         ctx.stroke();
       }
-      // 中央の目
+      // 中央の目 (形態で色が変わる)
       ctx.fillStyle = '#210';
       ctx.beginPath(); ctx.arc(0, 0, 20, 0, Math.PI * 2); ctx.fill();
-      ctx.fillStyle = game.frame % 12 < 6 ? '#f30' : '#f96';
+      const eyeBlink = game.frame % (form === 3 ? 6 : 12) < (form === 3 ? 3 : 6);
+      ctx.fillStyle = form === 3 ? (eyeBlink ? '#fff' : '#f30')
+        : form === 2 ? (eyeBlink ? '#fa0' : '#f60')
+        : (eyeBlink ? '#f30' : '#f96');
       ctx.beginPath(); ctx.arc(0, 0, 13, 0, Math.PI * 2); ctx.fill();
       ctx.fillStyle = '#000';
       const px = clamp((player.x - b.x) * 0.02, -5, 5);
       const py = clamp((player.y - b.y) * 0.02, -5, 5);
       ctx.beginPath(); ctx.arc(px, py, 6, 0, Math.PI * 2); ctx.fill();
+      // 変身の白い衝撃波
+      if (tf) {
+        const p = 1 - b.transform / 90;
+        ctx.strokeStyle = `rgba(255,255,255,${1 - p})`;
+        ctx.lineWidth = 4;
+        ctx.beginPath(); ctx.arc(0, 0, 20 + p * 100, 0, Math.PI * 2); ctx.stroke();
+        ctx.lineWidth = 1;
+      }
       break;
     }
   }
@@ -1104,7 +1176,7 @@ const game = {
     }
     // 自弾 vs ボス
     const boss = this.boss;
-    if (boss && boss.entered && !boss.dying) {
+    if (boss && boss.entered && !boss.dying && !boss.transform) {
       for (const b of this.playerBullets) {
         if (b.dead) continue;
         const rr = (boss.r + (b.type === 'beam' ? b.w / 2 : 6)) ** 2;
@@ -1429,14 +1501,23 @@ const game = {
     // ボスHPバー
     if (this.boss && this.boss.entered && !this.boss.dying) {
       const bw = 300, bx = (W - bw) / 2, by = 30;
+      const isCore = this.boss.type === 'core';
       ctx.textAlign = 'left';
       ctx.font = 'bold 11px monospace';
       ctx.fillStyle = '#f88';
-      ctx.fillText(this.boss.name, bx, by - 4);
+      const label = isCore
+        ? `${this.boss.name}  PHASE ${['I', 'II', 'III'][(this.boss.form || 1) - 1]}`
+        : this.boss.name;
+      ctx.fillText(label, bx, by - 4);
       ctx.fillStyle = '#301010';
       ctx.fillRect(bx, by, bw, 10);
       ctx.fillStyle = this.boss.hp < this.boss.maxHp * 0.3 ? '#f33' : '#f66';
       ctx.fillRect(bx + 1, by + 1, (bw - 2) * Math.max(0, this.boss.hp / this.boss.maxHp), 8);
+      if (isCore) { // 形態が切り替わるHPの目盛り
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(bx + bw / 3, by, 1, 10);
+        ctx.fillRect(bx + bw * 2 / 3, by, 1, 10);
+      }
       ctx.strokeStyle = '#844';
       ctx.strokeRect(bx + 0.5, by + 0.5, bw, 10);
     }
